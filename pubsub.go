@@ -10,8 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
-	"github.com/libp2p/go-libp2p-pubsub/timecache"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	"github.com/pancsta/go-libp2p-pubsub/timecache"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/discovery"
@@ -180,6 +181,9 @@ type PubSub struct {
 	// The return value of the inspector function is an error indicating whether the RPC should be processed or not.
 	// If the error is nil, the RPC is processed as usual. If the error is non-nil, the RPC is dropped.
 	appSpecificRpcInspector func(peer.ID, *RPC) error
+
+	// AM mock for testing
+	Mach *machMock
 }
 
 // PubSubRouter is the message router component of PubSub.
@@ -293,6 +297,7 @@ func NewPubSub(ctx context.Context, h host.Host, rt PubSubRouter, opts ...Option
 		seenMsgStrategy:       TimeCacheStrategy,
 		idGen:                 newMsgIdGenerator(),
 		counter:               uint64(time.Now().UnixNano()),
+		Mach:                  &machMock{},
 	}
 
 	for _, opt := range opts {
@@ -1419,4 +1424,15 @@ type RelayCancelFunc func()
 type addRelayReq struct {
 	topic string
 	resp  chan RelayCancelFunc
+}
+
+///// AM API compat
+
+func (p *PubSub) SetLogLevelAM(_ am.LogLevel) {}
+
+type machMock struct {
+	ID string
+}
+
+func (m *machMock) Dispose() {
 }

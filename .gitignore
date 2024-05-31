@@ -3,3 +3,4 @@ prof.out
 go-floodsub.test
 
 .idea/
+bench.env

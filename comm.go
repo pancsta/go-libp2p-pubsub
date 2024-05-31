@@ -14,7 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-msgio"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
 )
 
 // get the initial RPC containing all of our subscriptions to send to new peers

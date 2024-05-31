@@ -1,3 +1,9 @@
+## fork
+
+This is fork of libp2p pubsub which replaces the internals to use [asyncmachine-go](http://github.com/pancsta/asyncmachine-go).
+
+See [github.com/pancsta/**go-libp2p-pubsub-benchmark**](https://github.com/pancsta/go-libp2p-pubsub-benchmark/#libp2p-pubsub-benchmark) for more info.
+
 # go-libp2p-pubsub
 
 <p align="left">

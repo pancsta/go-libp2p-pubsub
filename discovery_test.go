@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -124,28 +126,43 @@ func (d *dummyDiscovery) FindPeers(ctx context.Context, ns string, opts ...disco
 }
 
 func TestSimpleDiscovery(t *testing.T) {
+	psmon.Log.Print("TestSimpleDiscovery\n")
+
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx, _, logTrace := psmon.StartTest(ctx)
 	defer cancel()
 
 	// Setup Discovery server and pubsub clients
-	const numHosts = 20
+	numHosts, err := strconv.Atoi(os.Getenv("NUM_HOSTS"))
+	if err != nil || numHosts == 0 {
+		t.Fatalf("Pass NUM_HOSTS %s", err)
+	}
+	numPeerMsgs, err := strconv.Atoi(os.Getenv("RAND_MSGS"))
+	if err != nil || numPeerMsgs == 0 {
+		t.Fatalf("Pass RAND_MSGS %s", err)
+	}
 	const topic = "foobar"
 
 	server := newDiscoveryServer()
 	discOpts := []discovery.Option{discovery.Limit(numHosts), discovery.TTL(1 * time.Minute)}
 
+	spanEnd := logTrace("init")
 	hosts := getNetHosts(t, ctx, numHosts)
 	psubs := make([]*PubSub, numHosts)
 	topicHandlers := make([]*Topic, numHosts)
 
 	for i, h := range hosts {
 		disc := &mockDiscoveryClient{h, server}
-		ps := getPubsub(ctx, h, WithDiscovery(disc, WithDiscoveryOpts(discOpts...)))
+		opts := []Option{WithDiscovery(disc, WithDiscoveryOpts(discOpts...))}
+		hostCtx, opts := psmonStartPubsub(ctx, i, h, opts)
+		ps := getPubsub(hostCtx, h, opts...)
 		psubs[i] = ps
 		topicHandlers[i], _ = ps.Join(topic)
 	}
+	spanEnd()
 
 	// Subscribe with all but one pubsub instance
+	spanEnd = logTrace("subscribe")
 	msgs := make([]*Subscription, numHosts)
 	for i, th := range topicHandlers[1:] {
 		subch, err := th.Subscribe()
@@ -173,19 +190,27 @@ func TestSimpleDiscovery(t *testing.T) {
 			t.Fatalf("Server did not register host %d with ID: %s", i+1, h.ID())
 		}
 	}
+	spanEnd()
 
 	// Try subscribing followed by publishing a single message
+	spanEnd = logTrace("ps1.Subscribe")
+	psubs[0].SetLogLevelAM(psmon.AMLogLevelVerbose)
 	subch, err := topicHandlers[0].Subscribe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	msgs[0] = subch
+	spanEnd()
 
+	spanEnd = logTrace("first message")
 	msg := []byte("first message")
+	// TODO flaky due to a missing peer, check handleIncomingRPC
 	if err := topicHandlers[0].Publish(ctx, msg, WithReadiness(MinTopicSize(numHosts-1))); err != nil {
 		t.Fatal(err)
 	}
+	spanEnd()
 
+	spanEnd = logTrace("verify first message")
 	for _, sub := range msgs {
 		got, err := sub.Next(ctx)
 		if err != nil {
@@ -195,18 +220,27 @@ func TestSimpleDiscovery(t *testing.T) {
 			t.Fatal("got wrong message!")
 		}
 	}
+	psubs[0].SetLogLevelAM(psmon.AMLogLevel)
+	spanEnd()
 
+	spanEnd = logTrace("rand msgs")
 	// Try random peers sending messages and make sure they are received
-	for i := 0; i < 100; i++ {
+	for i := 0; i < numPeerMsgs; i++ {
 		msg := []byte(fmt.Sprintf("%d the flooooooood %d", i, i))
 
 		owner := rand.Intn(len(psubs))
+		psubs[owner].SetLogLevelAM(psmon.AMLogLevelVerbose)
+		// TODO debug
+		//psmon.Log.Print("sending msg ", i, " from ", psubs[owner].Mach.ID)
 
 		if err := topicHandlers[owner].Publish(ctx, msg, WithReadiness(MinTopicSize(1))); err != nil {
 			t.Fatal(err)
 		}
 
-		for _, sub := range msgs {
+		for ii := range msgs {
+			sub := msgs[ii]
+			// TODO debug
+			//psmon.Log.Print("waiting for msg ", i, " with sub ", ii+1)
 			got, err := sub.Next(ctx)
 			if err != nil {
 				t.Fatal(sub.err)
@@ -215,6 +249,12 @@ func TestSimpleDiscovery(t *testing.T) {
 				t.Fatal("got wrong message!")
 			}
 		}
+		psubs[owner].SetLogLevelAM(psmon.AMLogLevel)
+	}
+	spanEnd()
+
+	for _, ps := range psubs {
+		ps.Mach.Dispose()
 	}
 }
 
