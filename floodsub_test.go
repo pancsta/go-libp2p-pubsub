@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	ss "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -646,6 +648,7 @@ func TestPeerTopicReporting(t *testing.T) {
 	assertPeerList(t, peers, hosts[1].ID())
 }
 
+// TODO asyncmachine fix
 func TestSubscribeMultipleTimes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -654,6 +657,8 @@ func TestSubscribeMultipleTimes(t *testing.T) {
 	psubs := getPubsubs(ctx, hosts)
 
 	connect(t, hosts[0], hosts[1])
+
+	whenStream := psubs[0].Mach.WhenTicks(ss.PeerNewStream, 2, nil)
 
 	sub1, err := psubs[0].Subscribe("foo")
 	if err != nil {
@@ -665,7 +670,8 @@ func TestSubscribeMultipleTimes(t *testing.T) {
 	}
 
 	// make sure subscribing is finished by the time we publish
-	time.Sleep(10 * time.Millisecond)
+	<-whenStream
+	time.Sleep(100 * time.Millisecond)
 
 	psubs[1].Publish("foo", []byte("bar"))
 
@@ -749,17 +755,23 @@ func TestWithNoSigning(t *testing.T) {
 		return base64.URLEncoding.EncodeToString(pmsg.Data)
 	}))
 
+	whenConn0 := psubs[0].Mach.WhenTicksEq(ss.PeersPending, 4, nil)
+	whenConn1 := psubs[1].Mach.WhenTicksEq(ss.PeersPending, 4, nil)
 	connect(t, hosts[0], hosts[1])
+	<-whenConn0
+	<-whenConn1
 
 	topic := "foobar"
 	data := []byte("this is a message")
 
+	whenStream := psubs[1].Mach.WhenTicks(ss.PeerNewStream, 2, nil)
 	sub, err := psubs[1].Subscribe(topic)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(time.Millisecond * 10)
+	<-whenStream
+	time.Sleep(time.Millisecond * 100)
 
 	err = psubs[0].Publish(topic, data)
 	if err != nil {
@@ -791,17 +803,22 @@ func TestWithSigning(t *testing.T) {
 	hosts := getNetHosts(t, ctx, 2)
 	psubs := getPubsubs(ctx, hosts, WithStrictSignatureVerification(true))
 
+	whenConn0 := psubs[0].Mach.WhenTicksEq(ss.PeersPending, 4, nil)
+	whenConn1 := psubs[1].Mach.WhenTicksEq(ss.PeersPending, 4, nil)
 	connect(t, hosts[0], hosts[1])
+	<-whenConn0
+	<-whenConn1
 
 	topic := "foobar"
 	data := []byte("this is a message")
 
+	whenStream := psubs[1].Mach.WhenTicks(ss.PeerNewStream, 2, nil)
 	sub, err := psubs[1].Subscribe(topic)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	time.Sleep(time.Millisecond * 10)
+	<-whenStream
 
 	err = psubs[0].Publish(topic, data)
 	if err != nil {
@@ -850,21 +867,31 @@ func TestImproperlySignedMessageRejected(t *testing.T) {
 
 	connect(t, adversary, honestPeer)
 
+	whenConn1 := adversaryPubSub.Mach.WhenTicksEq(ss.PeersPending, 4, nil)
+	whenConn2 := honestPubSub.Mach.WhenTicksEq(ss.PeersPending, 4, nil)
+	connect(t, hosts[0], hosts[1])
+	<-whenConn1
+	<-whenConn2
+
 	var (
 		topic            = "foobar"
 		correctMessage   = []byte("this is a correct message")
 		incorrectMessage = []byte("this is the incorrect message")
 	)
 
+	whenStream1 := adversaryPubSub.Mach.WhenTicks(ss.PeerNewStream, 2, nil)
 	adversarySubscription, err := adversaryPubSub.Subscribe(topic)
 	if err != nil {
 		t.Fatal(err)
 	}
+	whenStream2 := adversaryPubSub.Mach.WhenTicks(ss.PeerNewStream, 2, nil)
 	honestPeerSubscription, err := honestPubSub.Subscribe(topic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Millisecond * 50)
+
+	<-whenStream1
+	<-whenStream2
 
 	// First the adversary sends the correct message.
 	err = adversaryPubSub.Publish(topic, correctMessage)
@@ -1181,13 +1208,17 @@ func TestPreconnectedNodes(t *testing.T) {
 	}
 
 	// Connect the two hosts together
+	whenConn1 := p1.Mach.WhenTicksEq(ss.PeersPending, 4, nil)
 	connect(t, h2, h1)
+	<-whenConn1
 
 	// Setup the second DHT
 	p2, err := NewFloodSub(ctx, h2, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	whenConn2 := p1.Mach.WhenTicksEq(ss.PeersPending, 4, nil)
+	<-whenConn2
 
 	// See if it works
 	p2Topic, err := p2.Join("test")
@@ -1200,11 +1231,14 @@ func TestPreconnectedNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testPublish := func(publisher, receiver *Topic, msg []byte) {
+	testPublish := func(publisher, receiver *Topic, recvMach *am.Machine, msg []byte) {
+		whenStream := recvMach.WhenTicksEq(ss.PeerNewStream, 2, nil)
 		receiverSub, err := receiver.Subscribe()
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		<-whenStream
 
 		if err := publisher.Publish(ctx, msg, WithReadiness(MinTopicSize(1))); err != nil {
 			t.Fatal(err)
@@ -1221,8 +1255,8 @@ func TestPreconnectedNodes(t *testing.T) {
 	}
 
 	// Test both directions since PubSub uses one directional streams
-	testPublish(p1Topic, p2Topic, []byte("test1-to-2"))
-	testPublish(p1Topic, p2Topic, []byte("test2-to-1"))
+	testPublish(p1Topic, p2Topic, p2.Mach, []byte("test1-to-2"))
+	testPublish(p1Topic, p2Topic, p2.Mach, []byte("test2-to-1"))
 }
 
 func TestDedupInboundStreams(t *testing.T) {

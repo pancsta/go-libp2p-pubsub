@@ -1,9 +1,11 @@
 package pubsub
 
 import (
+	ss "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 )
 
 var _ network.Notifiee = (*PubSubNotif)(nil)
@@ -29,10 +31,7 @@ func (p *PubSubNotif) Connected(n network.Network, c network.Conn) {
 		p.newPeersMx.Unlock()
 		p.newPeersPrioLk.RUnlock()
 
-		select {
-		case p.newPeers <- struct{}{}:
-		default:
-		}
+		p.Mach.Add(am.S{ss.PeersPending}, nil)
 	}()
 }
 
@@ -68,8 +67,5 @@ func (p *PubSubNotif) Initialize() {
 	p.newPeersMx.Unlock()
 	p.newPeersPrioLk.RUnlock()
 
-	select {
-	case p.newPeers <- struct{}{}:
-	default:
-	}
+	p.Mach.Add1(ss.PeersPending, nil)
 }

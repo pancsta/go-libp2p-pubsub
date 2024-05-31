@@ -170,20 +170,20 @@ func TestRandomsubEnoughPeers(t *testing.T) {
 	time.Sleep(time.Second)
 
 	res := make(chan bool, 1)
-	rsubs[0].eval <- func() {
+	rsubs[0].Mach.Eval(nil, func() {
 		rs := rsubs[0].rt.(*RandomSubRouter)
 		res <- rs.EnoughPeers("test", 0)
-	}
+	}, "TestRandomsubEnoughPeers")
 
 	enough := <-res
 	if !enough {
 		t.Fatal("expected enough peers")
 	}
 
-	rsubs[0].eval <- func() {
+	rsubs[0].Mach.Eval(nil, func() {
 		rs := rsubs[0].rt.(*RandomSubRouter)
 		res <- rs.EnoughPeers("test", 100)
-	}
+	}, "TestRandomsubEnoughPeers")
 
 	enough = <-res
 	if !enough {

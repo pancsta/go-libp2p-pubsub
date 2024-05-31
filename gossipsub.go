@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"sync"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
 
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -421,6 +422,8 @@ func WithGossipSubParams(cfg GossipSubParams) Option {
 // is the fanout map. Fanout peer lists are expired if we don't publish any
 // messages to their topic for GossipSubFanoutTTL.
 type GossipSubRouter struct {
+	// TODO machine
+	mx       sync.RWMutex
 	p        *PubSub
 	peers    map[peer.ID]protocol.ID          // peer protocols
 	direct   map[peer.ID]struct{}             // direct peers
@@ -601,6 +604,10 @@ loop:
 func (gs *GossipSubRouter) RemovePeer(p peer.ID) {
 	log.Debugf("PEERDOWN: Remove disconnected peer %s", p)
 	gs.tracer.RemovePeer(p)
+
+	gs.mx.Lock()
+	defer gs.mx.Unlock()
+
 	delete(gs.peers, p)
 	for _, peers := range gs.mesh {
 		delete(peers, p)
@@ -629,7 +636,9 @@ func (gs *GossipSubRouter) EnoughPeers(topic string, suggested int) bool {
 	}
 
 	// gossipsub peers
+	gs.mx.Lock()
 	gsPeers = len(gs.mesh[topic])
+	gs.mx.Unlock()
 
 	if suggested == 0 {
 		suggested = gs.params.Dlo
@@ -697,7 +706,9 @@ func (gs *GossipSubRouter) handleIHave(p peer.ID, ctl *pb.ControlMessage) []*pb.
 	iwant := make(map[string]struct{})
 	for _, ihave := range ctl.GetIhave() {
 		topic := ihave.GetTopicID()
+		gs.mx.Lock()
 		_, ok := gs.mesh[topic]
+		gs.mx.Unlock()
 		if !ok {
 			continue
 		}
@@ -1381,11 +1392,7 @@ func appendOrMergeRPC(slice []*RPC, limit int, elems ...RPC) []*RPC {
 
 func (gs *GossipSubRouter) heartbeatTimer() {
 	time.Sleep(gs.params.HeartbeatInitialDelay)
-	select {
-	case gs.p.eval <- gs.heartbeat:
-	case <-gs.p.ctx.Done():
-		return
-	}
+	gs.p.Mach.Eval(nil, gs.heartbeat, "heartbeatTimer")
 
 	ticker := time.NewTicker(gs.params.HeartbeatInterval)
 	defer ticker.Stop()
@@ -1393,11 +1400,7 @@ func (gs *GossipSubRouter) heartbeatTimer() {
 	for {
 		select {
 		case <-ticker.C:
-			select {
-			case gs.p.eval <- gs.heartbeat:
-			case <-gs.p.ctx.Done():
-				return
-			}
+			gs.p.Mach.Eval(nil, gs.heartbeat, "heartbeatTimer")
 		case <-gs.p.ctx.Done():
 			return
 		}

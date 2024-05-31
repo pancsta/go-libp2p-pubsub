@@ -2,13 +2,18 @@ package pubsub
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/discovery"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	discimpl "github.com/libp2p/go-libp2p/p2p/discovery/backoff"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
+
+	ss "github.com/pancsta/go-libp2p-pubsub/states/discovery"
 )
 
 var (
@@ -71,6 +76,11 @@ type discover struct {
 
 	// options are the set of options to be used to complete struct construction in Start
 	options *discoverOptions
+
+	mach *am.Machine
+
+	ongoingBootstrap     map[string]*bootstrapFlow
+	ongoingBootstrapLock sync.Mutex
 }
 
 // MinTopicSize returns a function that checks if a router is ready for publishing based on the topic size.
@@ -87,12 +97,21 @@ func (d *discover) Start(p *PubSub, opts ...DiscoverOpt) error {
 	if d.discovery == nil || p == nil {
 		return nil
 	}
+	var err error
 
 	d.p = p
 	d.advertising = make(map[string]context.CancelFunc)
-	d.discoverQ = make(chan *discoverReq, 32)
 	d.ongoing = make(map[string]struct{})
-	d.done = make(chan string)
+	d.ongoingBootstrap = make(map[string]*bootstrapFlow)
+
+	hostNum := p.ctx.Value("psmonHostNum").(int)
+	machName := fmt.Sprintf("ps-%d-disc", hostNum)
+	d.mach, err = am.NewCommon(d.p.Mach.Ctx, machName,
+		ss.States, ss.Names, d, d.p.Mach, nil)
+	if err != nil {
+		return err
+	}
+	psmon.SetUpMach(d.mach, hostNum)
 
 	conn, err := d.options.connFactory(p.host)
 	if err != nil {
@@ -100,91 +119,105 @@ func (d *discover) Start(p *PubSub, opts ...DiscoverOpt) error {
 	}
 	d.connector = conn
 
-	go d.discoverLoop()
-	go d.pollTimer()
+	if res := d.mach.Add1(ss.Start, nil); res == am.Canceled {
+		return am.ErrCanceled
+	}
 
 	return nil
 }
 
-func (d *discover) pollTimer() {
-	select {
-	case <-time.After(DiscoveryPollInitialDelay):
-	case <-d.p.ctx.Done():
-		return
-	}
+func (d *discover) PoolTimerState(e *am.Event) {
+	stateCtx := e.Machine.NewStateCtx(ss.PoolTimer)
 
-	select {
-	case d.p.eval <- d.requestDiscovery:
-	case <-d.p.ctx.Done():
-		return
-	}
-
-	ticker := time.NewTicker(DiscoveryPollInterval)
-	defer ticker.Stop()
-
-	for {
+	go func() {
 		select {
-		case <-ticker.C:
-			select {
-			case d.p.eval <- d.requestDiscovery:
-			case <-d.p.ctx.Done():
-				return
-			}
-		case <-d.p.ctx.Done():
+		case <-stateCtx.Done():
+			return
+		case <-time.After(DiscoveryPollInitialDelay):
+		}
+		d.mach.Add1(ss.RefreshingDiscoveries, nil)
+
+		if DiscoveryPollInterval == 0 {
 			return
 		}
-	}
+		ticker := time.NewTicker(DiscoveryPollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-d.mach.Ctx.Done():
+				return
+			case <-ticker.C:
+				d.mach.Add1(ss.RefreshingDiscoveries, nil)
+			}
+		}
+	}()
 }
 
-func (d *discover) requestDiscovery() {
+func (d *discover) RefreshingDiscoveriesState(e *am.Event) {
+	d.mach.Remove1(ss.RefreshingDiscoveries, nil)
 	for t := range d.p.myTopics {
 		if !d.p.rt.EnoughPeers(t, 0) {
-			d.discoverQ <- &discoverReq{topic: t, done: make(chan struct{}, 1)}
+			req := &discoverReq{topic: t}
+			d.mach.Add1(ss.DiscoveringTopic, am.A{
+				"discoverReq": req,
+				"topic":       t,
+				"source":      "discover.RefreshingDiscoveriesState",
+			})
 		}
 	}
 }
 
-func (d *discover) discoverLoop() {
-	for {
-		select {
-		case discover := <-d.discoverQ:
-			topic := discover.topic
+func (d *discover) DiscoveringTopicExit(e *am.Event) bool {
+	return len(d.ongoing) == 0
+}
 
-			if _, ok := d.ongoing[topic]; ok {
-				discover.done <- struct{}{}
-				continue
-			}
+func (d *discover) DiscoveringTopicState(e *am.Event) {
+	req := e.Args["discoverReq"].(*discoverReq)
+	topic := req.topic
 
-			d.ongoing[topic] = struct{}{}
+	if _, ok := d.ongoing[topic]; ok {
+		return
+	}
 
-			go func() {
-				d.handleDiscovery(d.p.ctx, topic, discover.opts)
-				select {
-				case d.done <- topic:
-				case <-d.p.ctx.Done():
-				}
-				discover.done <- struct{}{}
-			}()
-		case topic := <-d.done:
+	d.ongoing[topic] = struct{}{}
+	ctx := d.mach.Ctx
+
+	// write the map early
+	delete(d.ongoing, topic)
+
+	go func() {
+		discoverCtx, cancel := context.WithTimeout(ctx, time.Second*10)
+		defer cancel()
+
+		peerCh, err := d.discovery.FindPeers(discoverCtx, topic, req.opts...)
+		if err != nil {
+			log.Debugf("error finding peers for topic %s: %v", topic, err)
 			delete(d.ongoing, topic)
-		case <-d.p.ctx.Done():
 			return
 		}
-	}
+
+		// TODO err not handled from `c.host.Connect(ctx, pi)`
+		d.connector.Connect(ctx, peerCh)
+		d.mach.Remove1(ss.DiscoveringTopic, nil)
+		d.mach.Add1(ss.TopicDiscovered, am.A{"topic": topic})
+	}()
 }
 
-// Advertise advertises this node's interest in a topic to a discovery service. Advertise is not thread-safe.
-func (d *discover) Advertise(topic string) {
-	if d.discovery == nil {
-		return
-	}
+func (d *discover) AdvertisingTopicExit(_ *am.Event) bool {
+	return len(d.advertising) == 0
+}
 
-	advertisingCtx, cancel := context.WithCancel(d.p.ctx)
+func (d *discover) AdvertisingTopicState(e *am.Event) {
+	topic := e.Args["topic"].(string)
 
 	if _, ok := d.advertising[topic]; ok {
-		cancel()
+		// in progress
+		d.mach.Log("already advertising topic %s", topic)
 		return
 	}
+
+	advertisingCtx, cancel := context.WithCancel(d.mach.Ctx)
 	d.advertising[topic] = cancel
 
 	go func() {
@@ -217,16 +250,33 @@ func (d *discover) Advertise(topic string) {
 	}()
 }
 
+// Advertise advertises this node's interest in a topic to a discovery service.
+func (d *discover) Advertise(topic string) {
+	if d.discovery == nil {
+		return
+	}
+	d.mach.Add1(ss.AdvertisingTopic, am.A{"topic": topic})
+}
+
+func (d *discover) StopAdvertisingTopicState(e *am.Event) {
+	defer d.mach.Remove1(ss.StopAdvertisingTopic, nil)
+	topic := e.Args["topic"].(string)
+
+	if advertiseCancel, ok := d.advertising[topic]; ok {
+		advertiseCancel()
+		delete(d.advertising, topic)
+	}
+
+	d.mach.Remove1(ss.AdvertisingTopic, nil)
+}
+
 // StopAdvertise stops advertising this node's interest in a topic. StopAdvertise is not thread-safe.
 func (d *discover) StopAdvertise(topic string) {
 	if d.discovery == nil {
 		return
 	}
 
-	if advertiseCancel, ok := d.advertising[topic]; ok {
-		advertiseCancel()
-		delete(d.advertising, topic)
-	}
+	d.mach.Add1(ss.StopAdvertisingTopic, am.A{"topic": topic})
 }
 
 // Discover searches for additional peers interested in a given topic
@@ -235,7 +285,70 @@ func (d *discover) Discover(topic string, opts ...discovery.Option) {
 		return
 	}
 
-	d.discoverQ <- &discoverReq{topic, opts, make(chan struct{}, 1)}
+	d.mach.Add1(ss.DiscoveringTopic, am.A{
+		"discoverReq": &discoverReq{topic, opts},
+		"source":      "discover.Discover",
+	})
+}
+
+func (d *discover) BootstrappingTopicEnter(e *am.Event) bool {
+	topic := e.Args["topic"].(string)
+	if _, ok := d.ongoingBootstrap[topic]; ok {
+		return false
+	}
+	return true
+}
+
+func (d *discover) BootstrappingTopicState(e *am.Event) {
+	topic := e.Args["topic"].(string)
+	ctx := e.Args["ctx"].(context.Context)
+	opts := e.Args["opts"].([]discovery.Option)
+	ready := e.Args["ready"].(RouterReady)
+
+	// init a BootstrapFlow machine for this topic
+	flow, err := newBootstrapFlow(ctx, d, topic, ready, opts)
+	if err != nil {
+		d.mach.AddErr(err)
+	}
+	d.mach.Log("created a BootstrapFlow for topic %s", topic)
+
+	// grouping multi states need locks
+	d.ongoingBootstrapLock.Lock()
+	d.ongoingBootstrap[topic] = flow
+	d.ongoingBootstrapLock.Unlock()
+
+	// start the bootstrapping flow
+	flow.mach.Add1(ss.Start, nil)
+	go func() {
+
+		d.mach.Log("BootstrappingTopicState before")
+		select {
+		case <-d.mach.Ctx.Done():
+			return
+		case <-flow.mach.When1(ss.TopicBootstrapped, nil):
+		}
+		d.mach.Log("BootstrappingTopicState done")
+		d.mach.Add1(ss.TopicBootstrapped, am.A{"topic": topic})
+		d.mach.Remove1(ss.BootstrappingTopic, am.A{"topic": topic})
+
+		// clean up
+		d.ongoingBootstrapLock.Lock()
+		delete(d.ongoingBootstrap, topic)
+		d.ongoingBootstrapLock.Unlock()
+		flow.mach.Dispose()
+	}()
+}
+
+func (d *discover) BootstrappingTopicExit(e *am.Event) bool {
+	d.ongoingBootstrapLock.Lock()
+	defer d.ongoingBootstrapLock.Unlock()
+	return len(d.ongoingBootstrap) == 0
+}
+
+func (d *discover) TopicBootstrappedState(e *am.Event) {
+	topic := e.Args["topic"].(string)
+	delete(d.ongoingBootstrap, topic)
+	d.mach.Remove1(ss.BootstrappingTopic, nil)
 }
 
 // Bootstrap attempts to bootstrap to a given topic. Returns true if bootstrapped successfully, false otherwise.
@@ -243,76 +356,26 @@ func (d *discover) Bootstrap(ctx context.Context, topic string, ready RouterRead
 	if d.discovery == nil {
 		return true
 	}
+	d.mach.Log("Bootstrap")
 
-	t := time.NewTimer(time.Hour)
-	if !t.Stop() {
-		<-t.C
+	// match state with args (has to be done before mach.Add)
+	whenBootstrapped := d.mach.WhenArgs(ss.TopicBootstrapped, am.A{"topic": topic}, nil)
+	d.mach.Add1(ss.BootstrappingTopic,
+		am.A{"ctx": ctx, "topic": topic, "opts": opts, "ready": ready})
+
+	select {
+	case <-whenBootstrapped:
+		return true
+	case <-d.mach.Ctx.Done():
+		return false
+	case <-ctx.Done():
+		return false
 	}
-	defer t.Stop()
-
-	for {
-		// Check if ready for publishing
-		bootstrapped := make(chan bool, 1)
-		select {
-		case d.p.eval <- func() {
-			done, _ := ready(d.p.rt, topic)
-			bootstrapped <- done
-		}:
-			if <-bootstrapped {
-				return true
-			}
-		case <-d.p.ctx.Done():
-			return false
-		case <-ctx.Done():
-			return false
-		}
-
-		// If not ready discover more peers
-		disc := &discoverReq{topic, opts, make(chan struct{}, 1)}
-		select {
-		case d.discoverQ <- disc:
-		case <-d.p.ctx.Done():
-			return false
-		case <-ctx.Done():
-			return false
-		}
-
-		select {
-		case <-disc.done:
-		case <-d.p.ctx.Done():
-			return false
-		case <-ctx.Done():
-			return false
-		}
-
-		t.Reset(time.Millisecond * 100)
-		select {
-		case <-t.C:
-		case <-d.p.ctx.Done():
-			return false
-		case <-ctx.Done():
-			return false
-		}
-	}
-}
-
-func (d *discover) handleDiscovery(ctx context.Context, topic string, opts []discovery.Option) {
-	discoverCtx, cancel := context.WithTimeout(ctx, time.Second*10)
-	defer cancel()
-
-	peerCh, err := d.discovery.FindPeers(discoverCtx, topic, opts...)
-	if err != nil {
-		log.Debugf("error finding peers for topic %s: %v", topic, err)
-		return
-	}
-
-	d.connector.Connect(ctx, peerCh)
 }
 
 type discoverReq struct {
 	topic string
 	opts  []discovery.Option
-	done  chan struct{}
 }
 
 type pubSubDiscovery struct {
@@ -345,4 +408,121 @@ func WithDiscoverConnector(connFactory BackoffConnectorFactory) DiscoverOpt {
 		d.connFactory = connFactory
 		return nil
 	}
+}
+
+///////////////
+///// BOOTSTRAP FLOW
+///////////////
+
+// bootstrapFlow is a state machine that handles the bootstrapping process for a given topic.
+type bootstrapFlow struct {
+	am.ExceptionHandler
+
+	ctx        context.Context
+	d          *discover
+	mach       *am.Machine
+	topic      string
+	checkReady RouterReady
+	opts       []discovery.Option
+	timer      *time.Timer
+}
+
+func newBootstrapFlow(ctx context.Context, d *discover, topic string, ready RouterReady, opts []discovery.Option) (*bootstrapFlow, error) {
+
+	b := &bootstrapFlow{
+		ctx:        ctx,
+		d:          d,
+		topic:      topic,
+		checkReady: ready,
+		opts:       opts,
+	}
+	hostNum := d.p.ctx.Value("psmonHostNum").(int)
+	tick := d.mach.Clock(ss.BootstrappingTopic)
+
+	id := fmt.Sprintf("ps-%d-disc-bf-%d-%s", hostNum, tick, topic)
+	mach, err := am.NewCommon(d.mach.Ctx, id, ss.StatesBootstrapFlow, ss.NamesBootstrapFlow, b, d.mach, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	psmon.SetUpMach(mach, hostNum)
+	b.mach = mach
+
+	return b, nil
+}
+
+func (b *bootstrapFlow) StartState(e *am.Event) {
+	b.timer = time.NewTimer(time.Hour)
+}
+
+func (b *bootstrapFlow) StartEnd(e *am.Event) {
+	b.timer.Stop()
+}
+
+func (b *bootstrapFlow) BootstrapCheckingState(e *am.Event) {
+
+	// Check if ready for publishing
+	ps := b.d.p
+	var ready bool
+	readyFn := func() {
+		// TODO make sure checkReady doesnt block
+		ready, _ = b.checkReady(ps.rt, b.topic)
+		b.mach.Log("checkReady for %s: %v", b.mach.ID, ready)
+	}
+
+	// run on the main pubsubs queue
+	ps.Mach.Eval(nil, readyFn, "bootstrapFlow.BootstrapCheckingState")
+	if ready {
+		b.mach.Add1(ss.TopicBootstrapped, nil)
+		return
+	}
+
+	// If not ready discover more peers
+	b.mach.Add1(ss.DiscoveringTopic, am.A{
+		"source": "bootstrapFlow.BootstrapCheckingState",
+	})
+}
+
+func (b *bootstrapFlow) DiscoveringTopicState(e *am.Event) {
+
+	args := am.A{"topic": b.topic}
+	whenDiscovered := b.d.mach.WhenArgs(ss.TopicDiscovered, args, nil)
+	b.d.mach.Add1(ss.DiscoveringTopic, am.A{
+		"discoverReq": &discoverReq{b.topic, b.opts},
+		"source":      "bootstrapFlow.DiscoveringTopicState",
+	})
+
+	stateCtx := b.mach.NewStateCtx(ss.DiscoveringTopic)
+	go func() {
+		if stateCtx.Err() != nil {
+			return // expired
+		}
+
+		select {
+		case <-b.ctx.Done():
+		case <-b.mach.WhenErr(nil):
+		case <-stateCtx.Done():
+		case <-whenDiscovered:
+			b.mach.Add1(ss.BootstrapDelay, nil)
+		}
+	}()
+}
+
+func (b *bootstrapFlow) BootstrapDelayState(e *am.Event) {
+
+	stateCtx := b.mach.NewStateCtx(ss.BootstrapDelay)
+	go func() {
+		b.timer.Reset(time.Millisecond * 100)
+		if stateCtx.Err() != nil {
+			return // expired
+		}
+
+		select {
+		case <-b.ctx.Done():
+		case <-b.mach.WhenErr(nil):
+		case <-stateCtx.Done():
+		case <-b.timer.C:
+			b.mach.Add1(ss.BootstrapChecking, nil)
+		}
+	}()
 }

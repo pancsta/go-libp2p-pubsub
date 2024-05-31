@@ -3,17 +3,21 @@ package pubsub
 import (
 	"context"
 	"sync"
+
+	ss "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 )
 
 // Subscription handles the details of a particular Topic subscription.
 // There may be many subscriptions for a given Topic.
 type Subscription struct {
-	topic    string
-	ch       chan *Message
-	cancelCh chan<- *Subscription
-	ctx      context.Context
-	err      error
-	once     sync.Once
+	topic  string
+	ch     chan *Message
+	psMach *am.Machine
+	ctx    context.Context
+	err    error
+	once   sync.Once
+	//mach     *am.Machine
 }
 
 // Topic returns the topic string associated with the Subscription
@@ -38,10 +42,7 @@ func (sub *Subscription) Next(ctx context.Context) (*Message, error) {
 // Cancel closes the subscription. If this is the last active subscription then pubsub will send an unsubscribe
 // announcement to the network.
 func (sub *Subscription) Cancel() {
-	select {
-	case sub.cancelCh <- sub:
-	case <-sub.ctx.Done():
-	}
+	sub.psMach.Add1(ss.RemoveSubscription, am.A{"Subscription": sub})
 }
 
 func (sub *Subscription) close() {

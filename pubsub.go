@@ -10,8 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
-	"github.com/libp2p/go-libp2p-pubsub/timecache"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	ss "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
+	"github.com/pancsta/go-libp2p-pubsub/timecache"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/discovery"
@@ -21,6 +22,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 
 	logging "github.com/ipfs/go-log/v2"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
+	"github.com/pancsta/asyncmachine-go/pkg/telemetry"
 )
 
 // DefaultMaximumMessageSize is 1mb.
@@ -75,41 +78,14 @@ type PubSub struct {
 	// incoming messages from other peers
 	incoming chan *RPC
 
-	// addSub is a control channel for us to add and remove subscriptions
-	addSub chan *addSubReq
-
-	// addRelay is a control channel for us to add and remove relays
-	addRelay chan *addRelayReq
-
-	// rmRelay is a relay cancellation channel
-	rmRelay chan string
-
-	// get list of topics we are subscribed to
-	getTopics chan *topicReq
-
-	// get chan of peers we are connected to
-	getPeers chan *listPeerReq
-
 	// send subscription here to cancel it
 	cancelCh chan *Subscription
-
-	// addSub is a channel for us to add a topic
-	addTopic chan *addTopicReq
-
-	// removeTopic is a topic cancellation channel
-	rmTopic chan *rmTopicReq
 
 	// a notification channel for new peer connections accumulated
 	newPeers       chan struct{}
 	newPeersPrioLk sync.RWMutex
 	newPeersMx     sync.Mutex
 	newPeersPend   map[peer.ID]struct{}
-
-	// a notification channel for new outoging peer streams
-	newPeerStream chan network.Stream
-
-	// a notification channel for errors opening new peer streams
-	newPeerError chan peer.ID
 
 	// a notification channel for when our peers die
 	peerDead       chan struct{}
@@ -131,21 +107,8 @@ type PubSub struct {
 	// topics tracks which topics each of our peers are subscribed to
 	topics map[string]map[peer.ID]struct{}
 
-	// sendMsg handles messages that have been validated
-	sendMsg chan *Message
-
-	// addVal handles validator registration requests
-	addVal chan *addValReq
-
-	// rmVal handles validator unregistration requests
-	rmVal chan *rmValReq
-
-	// eval thunk in event loop
-	eval chan func()
-
 	// peer blacklist
-	blacklist     Blacklist
-	blacklistPeer chan peer.ID
+	blacklist Blacklist
 
 	peers map[peer.ID]chan *RPC
 
@@ -180,9 +143,13 @@ type PubSub struct {
 	// The return value of the inspector function is an error indicating whether the RPC should be processed or not.
 	// If the error is nil, the RPC is processed as usual. If the error is non-nil, the RPC is dropped.
 	appSpecificRpcInspector func(peer.ID, *RPC) error
+
+	Mach *am.Machine
+	*am.ExceptionHandler
 }
 
 // PubSubRouter is the message router component of PubSub.
+// TODO asyncmachine
 type PubSubRouter interface {
 	// Protocols returns the list of protocols supported by the router.
 	Protocols() []protocol.ID
@@ -262,25 +229,10 @@ func NewPubSub(ctx context.Context, h host.Host, rt PubSubRouter, opts ...Option
 		signKey:               nil,
 		signPolicy:            StrictSign,
 		incoming:              make(chan *RPC, 32),
-		newPeers:              make(chan struct{}, 1),
 		newPeersPend:          make(map[peer.ID]struct{}),
-		newPeerStream:         make(chan network.Stream),
-		newPeerError:          make(chan peer.ID),
-		peerDead:              make(chan struct{}, 1),
 		peerDeadPend:          make(map[peer.ID]struct{}),
 		deadPeerBackoff:       newBackoff(ctx, 1000, BackoffCleanupInterval, MaxBackoffAttempts),
 		cancelCh:              make(chan *Subscription),
-		getPeers:              make(chan *listPeerReq),
-		addSub:                make(chan *addSubReq),
-		addRelay:              make(chan *addRelayReq),
-		rmRelay:               make(chan string),
-		addTopic:              make(chan *addTopicReq),
-		rmTopic:               make(chan *rmTopicReq),
-		getTopics:             make(chan *topicReq),
-		sendMsg:               make(chan *Message, 32),
-		addVal:                make(chan *addValReq),
-		rmVal:                 make(chan *rmValReq),
-		eval:                  make(chan func()),
 		myTopics:              make(map[string]*Topic),
 		mySubs:                make(map[string]map[*Subscription]struct{}),
 		myRelays:              make(map[string]int),
@@ -288,11 +240,15 @@ func NewPubSub(ctx context.Context, h host.Host, rt PubSubRouter, opts ...Option
 		peers:                 make(map[peer.ID]chan *RPC),
 		inboundStreams:        make(map[peer.ID]network.Stream),
 		blacklist:             NewMapBlacklist(),
-		blacklistPeer:         make(chan peer.ID),
 		seenMsgTTL:            TimeCacheDuration,
 		seenMsgStrategy:       TimeCacheStrategy,
 		idGen:                 newMsgIdGenerator(),
 		counter:               uint64(time.Now().UnixNano()),
+	}
+
+	err := ps.initMachine()
+	if err != nil {
+		return nil, err
 	}
 
 	for _, opt := range opts {
@@ -560,6 +516,13 @@ func WithAppSpecificRpcInspector(inspector func(peer.ID, *RPC) error) Option {
 // processLoop handles all inputs arriving on the channels
 func (p *PubSub) processLoop(ctx context.Context) {
 	defer func() {
+
+		// wait for a full disposal
+		<-p.Mach.WhenDisposed
+		if psmon.Log != nil {
+			psmon.Log.Printf("pubsub disposed %s\n", p.Mach.ID)
+		}
+
 		// Clean up go routines.
 		for _, ch := range p.peers {
 			close(ch)
@@ -571,101 +534,8 @@ func (p *PubSub) processLoop(ctx context.Context) {
 
 	for {
 		select {
-		case <-p.newPeers:
-			p.handlePendingPeers()
-
-		case s := <-p.newPeerStream:
-			pid := s.Conn().RemotePeer()
-
-			ch, ok := p.peers[pid]
-			if !ok {
-				log.Warn("new stream for unknown peer: ", pid)
-				s.Reset()
-				continue
-			}
-
-			if p.blacklist.Contains(pid) {
-				log.Warn("closing stream for blacklisted peer: ", pid)
-				close(ch)
-				delete(p.peers, pid)
-				s.Reset()
-				continue
-			}
-
-			p.rt.AddPeer(pid, s.Protocol())
-
-		case pid := <-p.newPeerError:
-			delete(p.peers, pid)
-
-		case <-p.peerDead:
-			p.handleDeadPeers()
-
-		case treq := <-p.getTopics:
-			var out []string
-			for t := range p.mySubs {
-				out = append(out, t)
-			}
-			treq.resp <- out
-		case topic := <-p.addTopic:
-			p.handleAddTopic(topic)
-		case topic := <-p.rmTopic:
-			p.handleRemoveTopic(topic)
-		case sub := <-p.cancelCh:
-			p.handleRemoveSubscription(sub)
-		case sub := <-p.addSub:
-			p.handleAddSubscription(sub)
-		case relay := <-p.addRelay:
-			p.handleAddRelay(relay)
-		case topic := <-p.rmRelay:
-			p.handleRemoveRelay(topic)
-		case preq := <-p.getPeers:
-			tmap, ok := p.topics[preq.topic]
-			if preq.topic != "" && !ok {
-				preq.resp <- nil
-				continue
-			}
-			var peers []peer.ID
-			for p := range p.peers {
-				if preq.topic != "" {
-					_, ok := tmap[p]
-					if !ok {
-						continue
-					}
-				}
-				peers = append(peers, p)
-			}
-			preq.resp <- peers
 		case rpc := <-p.incoming:
 			p.handleIncomingRPC(rpc)
-
-		case msg := <-p.sendMsg:
-			p.publishMessage(msg)
-
-		case req := <-p.addVal:
-			p.val.AddValidator(req)
-
-		case req := <-p.rmVal:
-			p.val.RemoveValidator(req)
-
-		case thunk := <-p.eval:
-			thunk()
-
-		case pid := <-p.blacklistPeer:
-			log.Infof("Blacklisting peer %s", pid)
-			p.blacklist.Add(pid)
-
-			ch, ok := p.peers[pid]
-			if ok {
-				close(ch)
-				delete(p.peers, pid)
-				for t, tmap := range p.topics {
-					if _, ok := tmap[pid]; ok {
-						delete(tmap, pid)
-						p.notifyLeave(t, pid)
-					}
-				}
-				p.rt.RemovePeer(pid)
-			}
 
 		case <-ctx.Done():
 			log.Info("pubsub processloop shutting down")
@@ -674,7 +544,13 @@ func (p *PubSub) processLoop(ctx context.Context) {
 	}
 }
 
-func (p *PubSub) handlePendingPeers() {
+///////////////
+///// HANDLERS
+///////////////
+
+func (p *PubSub) PeersPendingState(e *am.Event) {
+	p.Mach.Remove1(ss.PeersPending, nil)
+
 	p.newPeersPrioLk.Lock()
 
 	if len(p.newPeersPend) == 0 {
@@ -706,19 +582,47 @@ func (p *PubSub) handlePendingPeers() {
 		go p.handleNewPeer(p.ctx, pid, messages)
 		p.peers[pid] = messages
 	}
+
 }
 
-func (p *PubSub) handleDeadPeers() {
-	p.peerDeadPrioLk.Lock()
+func (p *PubSub) PeerNewStreamState(e *am.Event) {
+	p.Mach.Remove1(ss.PeerNewStream, nil)
 
-	if len(p.peerDeadPend) == 0 {
-		p.peerDeadPrioLk.Unlock()
-		return
+	s := e.Args["network.Stream"].(network.Stream)
+	pid := s.Conn().RemotePeer()
+
+	ch, ok := p.peers[pid]
+	if !ok {
+		log.Warn("new stream for unknown peer: ", pid)
+		s.Reset()
 	}
+
+	if p.blacklist.Contains(pid) {
+		log.Warn("closing stream for blacklisted peer: ", pid)
+		close(ch)
+		delete(p.peers, pid)
+		s.Reset()
+	}
+
+	p.rt.AddPeer(pid, s.Protocol())
+}
+
+func (p *PubSub) PeerErrorState(e *am.Event) {
+	p.Mach.Remove1(ss.PeerError, nil)
+
+	pid := e.Args["pid"].(peer.ID)
+	delete(p.peers, pid)
+}
+
+func (p *PubSub) PeersDeadEnter(e *am.Event) bool {
+	return len(p.peerDeadPend) > 0
+}
+
+func (p *PubSub) PeersDeadState(e *am.Event) {
+	p.Mach.Remove1(ss.PeersDead, nil)
 
 	deadPeers := p.peerDeadPend
 	p.peerDeadPend = make(map[peer.ID]struct{})
-	p.peerDeadPrioLk.Unlock()
 
 	for pid := range deadPeers {
 		ch, ok := p.peers[pid]
@@ -756,28 +660,64 @@ func (p *PubSub) handleDeadPeers() {
 	}
 }
 
-// handleAddTopic adds a tracker for a particular topic.
+func (p *PubSub) GetTopicsEnter(e *am.Event) bool {
+	_, ok := e.Args["topicReq"].(*topicReq)
+	return ok
+}
+
+func (p *PubSub) GetTopicsState(e *am.Event) {
+	p.Mach.Remove1(ss.GetTopics, nil)
+
+	req := e.Args["topicReq"].(*topicReq)
+	var out []string
+	for t := range p.mySubs {
+		out = append(out, t)
+	}
+	// buffered
+	req.resp <- out
+}
+
+func (p *PubSub) AddTopicEnter(e *am.Event) bool {
+	_, ok := e.Args["addTopicReq"].(*addTopicReq)
+	return ok
+}
+
+// AddTopicState adds a tracker for a particular topic.
 // Only called from processLoop.
-func (p *PubSub) handleAddTopic(req *addTopicReq) {
+func (p *PubSub) AddTopicState(e *am.Event) {
+	p.Mach.Remove1(ss.AddTopic, nil)
+
+	req := e.Args["addTopicReq"].(*addTopicReq)
 	topic := req.topic
 	topicID := topic.topic
 
 	t, ok := p.myTopics[topicID]
 	if ok {
+		// buffered
 		req.resp <- t
 		return
 	}
 
 	p.myTopics[topicID] = topic
+	// buffered
 	req.resp <- topic
 }
 
-// handleRemoveTopic removes Topic tracker from bookkeeping.
+func (p *PubSub) RemoveTopicEnter(e *am.Event) bool {
+	_, ok := e.Args["rmTopicReq"].(*rmTopicReq)
+	return ok
+}
+
+// RemoveTopicState removes Topic tracker from bookkeeping.
 // Only called from processLoop.
-func (p *PubSub) handleRemoveTopic(req *rmTopicReq) {
+func (p *PubSub) RemoveTopicState(e *am.Event) {
+	p.Mach.Remove1(ss.RemoveTopic, nil)
+
+	req := e.Args["rmTopicReq"].(*rmTopicReq)
 	topic := p.myTopics[req.topic.topic]
 
 	if topic == nil {
+		// buffered
 		req.resp <- nil
 		return
 	}
@@ -786,23 +726,30 @@ func (p *PubSub) handleRemoveTopic(req *rmTopicReq) {
 		len(p.mySubs[req.topic.topic]) == 0 &&
 		p.myRelays[req.topic.topic] == 0 {
 		delete(p.myTopics, topic.topic)
+		// buffered channels only
 		req.resp <- nil
 		return
 	}
 
+	// buffered
 	req.resp <- fmt.Errorf("cannot close topic: outstanding event handlers or subscriptions")
 }
 
-// handleRemoveSubscription removes Subscription sub from bookeeping.
+func (p *PubSub) RemoveSubscriptionEnter(e *am.Event) bool {
+	sub, ok1 := e.Args["Subscription"].(*Subscription)
+	_, ok2 := p.mySubs[sub.topic]
+	return ok1 && ok2
+}
+
+// RemoveSubscriptionState removes Subscription sub from bookeeping.
 // If this was the last subscription and no more relays exist for a given topic,
 // it will also announce that this node is not subscribing to this topic anymore.
 // Only called from processLoop.
-func (p *PubSub) handleRemoveSubscription(sub *Subscription) {
-	subs := p.mySubs[sub.topic]
+func (p *PubSub) RemoveSubscriptionState(e *am.Event) {
+	p.Mach.Remove1(ss.RemoveSubscription, nil)
 
-	if subs == nil {
-		return
-	}
+	sub := e.Args["Subscription"].(*Subscription)
+	subs := p.mySubs[sub.topic]
 
 	sub.err = ErrSubscriptionCancelled
 	sub.close()
@@ -814,24 +761,38 @@ func (p *PubSub) handleRemoveSubscription(sub *Subscription) {
 		// stop announcing only if there are no more subs and relays
 		if p.myRelays[sub.topic] == 0 {
 			p.disc.StopAdvertise(sub.topic)
-			p.announce(sub.topic, false)
+			p.Mach.Add1(ss.AnnouncingTopic, am.A{
+				"topic":    sub.topic,
+				"sub.bool": false,
+			})
 			p.rt.Leave(sub.topic)
 		}
 	}
 }
 
-// handleAddSubscription adds a Subscription for a particular topic. If it is
+func (p *PubSub) AddSubscriptionEnter(e *am.Event) bool {
+	_, ok1 := e.Args["addSubReq"].(*addSubReq)
+	return ok1
+}
+
+// AddSubscriptionState adds a Subscription for a particular topic. If it is
 // the first subscription and no relays exist so far for the topic, it will
 // announce that this node subscribes to the topic.
 // Only called from processLoop.
-func (p *PubSub) handleAddSubscription(req *addSubReq) {
+func (p *PubSub) AddSubscriptionState(e *am.Event) {
+	p.Mach.Remove1(ss.AddSubscription, nil)
+
+	req := e.Args["addSubReq"].(*addSubReq)
 	sub := req.sub
 	subs := p.mySubs[sub.topic]
 
 	// announce we want this topic if neither subs nor relays exist so far
 	if len(subs) == 0 && p.myRelays[sub.topic] == 0 {
 		p.disc.Advertise(sub.topic)
-		p.announce(sub.topic, true)
+		p.Mach.Add1(ss.AnnouncingTopic, am.A{
+			"topic":    sub.topic,
+			"sub.bool": true,
+		})
 		p.rt.Join(sub.topic)
 	}
 
@@ -840,18 +801,23 @@ func (p *PubSub) handleAddSubscription(req *addSubReq) {
 		p.mySubs[sub.topic] = make(map[*Subscription]struct{})
 	}
 
-	sub.cancelCh = p.cancelCh
-
 	p.mySubs[sub.topic][sub] = struct{}{}
 
+	// buffered
 	req.resp <- sub
 }
 
-// handleAddRelay adds a relay for a particular topic. If it is
+func (p *PubSub) AddRelayEnter(e *am.Event) bool {
+	_, ok := e.Args["addRelayReq"].(*addRelayReq)
+	return ok
+}
+
+// AddRelayState adds a relay for a particular topic. If it is
 // the first relay and no subscriptions exist so far for the topic , it will
 // announce that this node relays for the topic.
 // Only called from processLoop.
-func (p *PubSub) handleAddRelay(req *addRelayReq) {
+func (p *PubSub) AddRelayState(e *am.Event) {
+	req := e.Args["addRelayReq"].(*addRelayReq)
 	topic := req.topic
 
 	p.myRelays[topic]++
@@ -859,7 +825,10 @@ func (p *PubSub) handleAddRelay(req *addRelayReq) {
 	// announce we want this topic if neither relays nor subs exist so far
 	if p.myRelays[topic] == 1 && len(p.mySubs[topic]) == 0 {
 		p.disc.Advertise(topic)
-		p.announce(topic, true)
+		p.Mach.Add1(ss.AnnouncingTopic, am.A{
+			"topic":    topic,
+			"sub.bool": true,
+		})
 		p.rt.Join(topic)
 	}
 
@@ -871,26 +840,29 @@ func (p *PubSub) handleAddRelay(req *addRelayReq) {
 			return
 		}
 
-		select {
-		case p.rmRelay <- topic:
-			isCancelled = true
-		case <-p.ctx.Done():
-		}
+		isCancelled = true
+		p.Mach.Add1(ss.RemoveRelay, am.A{"topic": topic})
 	}
 
+	// buffered
 	req.resp <- relayCancelFunc
+	p.Mach.Remove1(ss.AddRelay, nil)
 }
 
-// handleRemoveRelay removes one relay reference from bookkeeping.
+func (p *PubSub) RemoveRelayEnter(e *am.Event) bool {
+	topic, ok := e.Args["topic"].(string)
+	return ok && p.myRelays[topic] > 0
+}
+
+// RemoveRelayState removes one relay reference from bookkeeping.
 // If this was the last relay reference and no more subscriptions exist
 // for a given topic, it will also announce that this node is not relaying
 // for this topic anymore.
 // Only called from processLoop.
-func (p *PubSub) handleRemoveRelay(topic string) {
-	if p.myRelays[topic] == 0 {
-		return
-	}
+func (p *PubSub) RemoveRelayState(e *am.Event) {
+	p.Mach.Remove1(ss.RemoveRelay, nil)
 
+	topic := e.Args["topic"].(string)
 	p.myRelays[topic]--
 
 	if p.myRelays[topic] == 0 {
@@ -899,32 +871,156 @@ func (p *PubSub) handleRemoveRelay(topic string) {
 		// stop announcing only if there are no more relays and subs
 		if len(p.mySubs[topic]) == 0 {
 			p.disc.StopAdvertise(topic)
-			p.announce(topic, false)
+			p.Mach.Add1(ss.AnnouncingTopic, am.A{
+				"topic":    topic,
+				"sub.bool": false,
+			})
 			p.rt.Leave(topic)
 		}
 	}
 }
 
-// announce announces whether or not this node is interested in a given topic
-// Only called from processLoop.
-func (p *PubSub) announce(topic string, sub bool) {
+func (p *PubSub) GetPeersEnter(e *am.Event) bool {
+	_, ok := e.Args["listPeerReq"].(*listPeerReq)
+	return ok
+}
+
+func (p *PubSub) GetPeersState(e *am.Event) {
+	p.Mach.Remove1(ss.GetPeers, nil)
+
+	req := e.Args["listPeerReq"].(*listPeerReq)
+	topic := req.topic
+
+	tmap, ok := p.topics[topic]
+	if topic != "" && !ok {
+		// buffered
+		req.resp <- nil
+		return
+	}
+
+	var out []peer.ID
+	for p := range p.peers {
+		if topic != "" {
+			_, ok := tmap[p]
+			if !ok {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+
+	req.resp <- out
+}
+
+func (p *PubSub) PublishMessageEnter(e *am.Event) bool {
+	_, ok := e.Args["Message"].(*Message)
+	return ok
+}
+
+func (p *PubSub) PublishMessageState(e *am.Event) {
+	p.Mach.Remove1(ss.PublishMessage, nil)
+
+	msg := e.Args["Message"].(*Message)
+	p.tracer.DeliverMessage(msg)
+	p.notifySubs(msg)
+	if !msg.Local {
+		p.rt.Publish(msg)
+	}
+}
+
+func (p *PubSub) AddValidatorEnter(e *am.Event) bool {
+	_, ok := e.Args["addValReq"].(*addValReq)
+	return ok
+}
+
+func (p *PubSub) AddValidatorState(e *am.Event) {
+	p.Mach.Remove1(ss.AddValidator, nil)
+
+	req := e.Args["addValReq"].(*addValReq)
+	p.val.AddValidator(req)
+}
+
+func (p *PubSub) RemoveValidatorEnter(e *am.Event) bool {
+	_, ok := e.Args["rmValReq"].(*rmValReq)
+	return ok
+}
+
+func (p *PubSub) RemoveValidatorState(e *am.Event) {
+	p.Mach.Remove1(ss.RemoveValidator, nil)
+
+	req := e.Args["rmValReq"].(*rmValReq)
+	p.val.RemoveValidator(req)
+}
+
+func (p *PubSub) BlacklistPeerEnter(e *am.Event) bool {
+	_, ok := e.Args["pid"].(peer.ID)
+	return ok
+}
+
+func (p *PubSub) BlacklistPeerState(e *am.Event) {
+	p.Mach.Remove1(ss.BlacklistPeer, nil)
+
+	pid := e.Args["pid"].(peer.ID)
+	log.Infof("Blacklisting peer %s", pid)
+	p.blacklist.Add(pid)
+
+	ch, ok := p.peers[pid]
+	if ok {
+		close(ch)
+		delete(p.peers, pid)
+		for t, tmap := range p.topics {
+			if _, ok := tmap[pid]; ok {
+				delete(tmap, pid)
+				p.notifyLeave(t, pid)
+			}
+		}
+		p.rt.RemovePeer(pid)
+	}
+}
+
+func (p *PubSub) AnnouncingTopicEnter(e *am.Event) bool {
+	_, ok1 := e.Args["topic"].(string)
+	_, ok2 := e.Args["sub.bool"].(bool)
+	return ok1 && ok2
+}
+
+// AnnouncingTopicState announces whether or not this node is interested in a given topic
+// Only called from processLoop, ends with TopicAnnouncedState.
+// TODO bind to topic's context
+func (p *PubSub) AnnouncingTopicState(e *am.Event) {
+	p.Mach.Remove1(ss.AnnouncingTopic, nil)
+
+	topic := e.Args["topic"].(string)
+	sub := e.Args["sub.bool"].(bool)
 	subopt := &pb.RPC_SubOpts{
 		Topicid:   &topic,
 		Subscribe: &sub,
 	}
 
-	out := rpcWithSubs(subopt)
-	for pid, peer := range p.peers {
-		select {
-		case peer <- out:
-			p.tracer.SendRPC(out, pid)
-		default:
-			log.Infof("Can't send announce message to peer %s: queue full; scheduling retry", pid)
-			p.tracer.DropRPC(out, pid)
-			go p.announceRetry(pid, topic, sub)
+	go func() {
+		out := rpcWithSubs(subopt)
+		for pid, peerCh := range p.peers {
+			select {
+			case peerCh <- out:
+				p.tracer.SendRPC(out, pid)
+			default:
+				log.Infof("Can't send announce message to peer %s: queue full; scheduling retry", pid)
+				p.tracer.DropRPC(out, pid)
+				go p.announceRetry(pid, topic, sub)
+			}
 		}
-	}
+
+		p.Mach.Add1(ss.TopicAnnounced, am.A{"topic": topic})
+	}()
 }
+
+func (p *PubSub) TopicAnnouncedState(e *am.Event) {
+	p.Mach.Remove1(ss.TopicAnnounced, nil)
+}
+
+///////////////
+///// METHODS
+///////////////
 
 func (p *PubSub) announceRetry(pid peer.ID, topic string, sub bool) {
 	time.Sleep(time.Duration(1+rand.Intn(1000)) * time.Millisecond)
@@ -940,10 +1036,7 @@ func (p *PubSub) announceRetry(pid peer.ID, topic string, sub bool) {
 		}
 	}
 
-	select {
-	case p.eval <- retry:
-	case <-p.ctx.Done():
-	}
+	p.Mach.Eval(nil, retry, "announceRetry")
 }
 
 func (p *PubSub) doAnnounceRetry(pid peer.ID, topic string, sub bool) {
@@ -961,6 +1054,7 @@ func (p *PubSub) doAnnounceRetry(pid peer.ID, topic string, sub bool) {
 	select {
 	case peer <- out:
 		p.tracer.SendRPC(out, pid)
+		p.Mach.Add1(ss.TopicAnnounced, am.A{"topic": topic, "sub.bool": sub})
 	default:
 		log.Infof("Can't send announce message to peer %s: queue full; scheduling retry", pid)
 		p.tracer.DropRPC(out, pid)
@@ -1027,81 +1121,90 @@ func (p *PubSub) notifyLeave(topic string, pid peer.ID) {
 }
 
 func (p *PubSub) handleIncomingRPC(rpc *RPC) {
-	// pass the rpc through app specific validation (if any available).
-	if p.appSpecificRpcInspector != nil {
-		// check if the RPC is allowed by the external inspector
-		if err := p.appSpecificRpcInspector(rpc.from, rpc); err != nil {
-			log.Debugf("application-specific inspection failed, rejecting incoming rpc: %s", err)
-			return // reject the RPC
-		}
-	}
+	// run on machine's queue (blocks until done)
+	p.Mach.Eval(nil, func() {
 
-	p.tracer.RecvRPC(rpc)
-
-	subs := rpc.GetSubscriptions()
-	if len(subs) != 0 && p.subFilter != nil {
-		var err error
-		subs, err = p.subFilter.FilterIncomingSubscriptions(rpc.from, subs)
-		if err != nil {
-			log.Debugf("subscription filter error: %s; ignoring RPC", err)
-			return
-		}
-	}
-
-	for _, subopt := range subs {
-		t := subopt.GetTopicid()
-
-		if subopt.GetSubscribe() {
-			tmap, ok := p.topics[t]
-			if !ok {
-				tmap = make(map[peer.ID]struct{})
-				p.topics[t] = tmap
+		// pass the rpc through app specific validation (if any available).
+		if p.appSpecificRpcInspector != nil {
+			// check if the RPC is allowed by the external inspector
+			if err := p.appSpecificRpcInspector(rpc.from, rpc); err != nil {
+				log.Debugf("application-specific inspection failed, rejecting incoming rpc: %s", err)
+				return // reject the RPC
 			}
+		}
 
-			if _, ok = tmap[rpc.from]; !ok {
-				tmap[rpc.from] = struct{}{}
-				if topic, ok := p.myTopics[t]; ok {
-					peer := rpc.from
-					topic.sendNotification(PeerEvent{PeerJoin, peer})
+		p.tracer.RecvRPC(rpc)
+
+		subs := rpc.GetSubscriptions()
+		if len(subs) != 0 && p.subFilter != nil {
+			var err error
+			subs, err = p.subFilter.FilterIncomingSubscriptions(rpc.from, subs)
+			if err != nil {
+				log.Debugf("subscription filter error: %s; ignoring RPC", err)
+				return
+			}
+		}
+
+		for _, subopt := range subs {
+			t := subopt.GetTopicid()
+
+			if subopt.GetSubscribe() {
+				var toNotify []*Topic
+
+				tmap, ok := p.topics[t]
+				if !ok {
+					tmap = make(map[peer.ID]struct{})
+					p.topics[t] = tmap
+				}
+				if _, ok := tmap[rpc.from]; !ok {
+					tmap[rpc.from] = struct{}{}
+					if topic, ok := p.myTopics[t]; ok {
+						toNotify = append(toNotify, topic)
+					}
+				}
+
+				for _, topic := range toNotify {
+					topic.sendNotification(PeerEvent{PeerJoin, rpc.from})
+				}
+
+			} else {
+				tmap, ok := p.topics[t]
+				if !ok {
+					continue
+				}
+
+				if _, ok := tmap[rpc.from]; ok {
+					delete(tmap, rpc.from)
+					p.notifyLeave(t, rpc.from)
 				}
 			}
-		} else {
-			tmap, ok := p.topics[t]
-			if !ok {
-				continue
-			}
+		}
 
-			if _, ok := tmap[rpc.from]; ok {
-				delete(tmap, rpc.from)
-				p.notifyLeave(t, rpc.from)
+		// ask the router to vet the peer before commiting any processing resources
+		switch p.rt.AcceptFrom(rpc.from) {
+		case AcceptNone:
+			log.Debugf("received RPC from router graylisted peer %s; dropping RPC", rpc.from)
+			return
+
+		case AcceptControl:
+			if len(rpc.GetPublish()) > 0 {
+				log.Debugf("peer %s was throttled by router; ignoring %d payload messages", rpc.from, len(rpc.GetPublish()))
+			}
+			p.tracer.ThrottlePeer(rpc.from)
+
+		case AcceptAll:
+			for _, pmsg := range rpc.GetPublish() {
+				if !(p.subscribedToMsg(pmsg) || p.canRelayMsg(pmsg)) {
+					log.Debug("received message in topic we didn't subscribe to; ignoring message")
+					continue
+				}
+
+				p.pushMsg(&Message{pmsg, "", rpc.from, nil, false})
 			}
 		}
-	}
 
-	// ask the router to vet the peer before commiting any processing resources
-	switch p.rt.AcceptFrom(rpc.from) {
-	case AcceptNone:
-		log.Debugf("received RPC from router graylisted peer %s; dropping RPC", rpc.from)
-		return
-
-	case AcceptControl:
-		if len(rpc.GetPublish()) > 0 {
-			log.Debugf("peer %s was throttled by router; ignoring %d payload messages", rpc.from, len(rpc.GetPublish()))
-		}
-		p.tracer.ThrottlePeer(rpc.from)
-
-	case AcceptAll:
-		for _, pmsg := range rpc.GetPublish() {
-			if !(p.subscribedToMsg(pmsg) || p.canRelayMsg(pmsg)) {
-				log.Debug("received message in topic we didn't subscribe to; ignoring message")
-				continue
-			}
-
-			p.pushMsg(&Message{pmsg, "", rpc.from, nil, false})
-		}
-	}
-
-	p.rt.HandleRPC(rpc)
+		p.rt.HandleRPC(rpc)
+	}, "handleIncomingRPC")
 }
 
 // DefaultMsgIdFn returns a unique ID of the passed Message
@@ -1157,7 +1260,7 @@ func (p *PubSub) pushMsg(msg *Message) {
 	}
 
 	if p.markSeen(id) {
-		p.publishMessage(msg)
+		p.Mach.Add1(ss.PublishMessage, am.A{"Message": msg})
 	}
 }
 
@@ -1191,14 +1294,6 @@ func (p *PubSub) checkSigningPolicy(msg *Message) error {
 	}
 
 	return nil
-}
-
-func (p *PubSub) publishMessage(msg *Message) {
-	p.tracer.DeliverMessage(msg)
-	p.notifySubs(msg)
-	if !msg.Local {
-		p.rt.Publish(msg)
-	}
 }
 
 type addTopicReq struct {
@@ -1261,14 +1356,11 @@ func (p *PubSub) tryJoin(topic string, opts ...TopicOpt) (*Topic, bool, error) {
 	}
 
 	resp := make(chan *Topic, 1)
-	select {
-	case t.p.addTopic <- &addTopicReq{
+	req := &addTopicReq{
 		topic: t,
 		resp:  resp,
-	}:
-	case <-t.p.ctx.Done():
-		return nil, false, t.p.ctx.Err()
 	}
+	p.Mach.Add1(ss.AddTopic, am.A{"addTopicReq": req})
 	returnedTopic := <-resp
 
 	if returnedTopic != t {
@@ -1316,13 +1408,14 @@ type topicReq struct {
 
 // GetTopics returns the topics this node is subscribed to.
 func (p *PubSub) GetTopics() []string {
-	out := make(chan []string, 1)
+	req := &topicReq{resp: make(chan []string, 1)}
+	p.Mach.Add1(ss.GetTopics, am.A{"topicReq": req})
 	select {
-	case p.getTopics <- &topicReq{resp: out}:
+	case resp := <-req.resp:
+		return resp
 	case <-p.ctx.Done():
 		return nil
 	}
-	return <-out
 }
 
 // Publish publishes data to the given topic.
@@ -1352,24 +1445,25 @@ type listPeerReq struct {
 
 // ListPeers returns a list of peers we are connected to in the given topic.
 func (p *PubSub) ListPeers(topic string) []peer.ID {
-	out := make(chan []peer.ID)
-	select {
-	case p.getPeers <- &listPeerReq{
-		resp:  out,
+	req := &listPeerReq{
+		resp:  make(chan []peer.ID, 1),
 		topic: topic,
-	}:
+	}
+
+	p.Mach.Add1(ss.GetPeers, am.A{"listPeerReq": req})
+	select {
+	case resp := <-req.resp:
+		return resp
 	case <-p.ctx.Done():
 		return nil
 	}
-	return <-out
 }
 
 // BlacklistPeer blacklists a peer; all messages from this peer will be unconditionally dropped.
 func (p *PubSub) BlacklistPeer(pid peer.ID) {
-	select {
-	case p.blacklistPeer <- pid:
-	case <-p.ctx.Done():
-	}
+	when := p.Mach.WhenArgs(ss.BlacklistPeer, am.A{"pid": pid}, nil)
+	p.Mach.Add1(ss.BlacklistPeer, am.A{"pid": pid})
+	<-when
 }
 
 // RegisterTopicValidator registers a validator for topic.
@@ -1377,41 +1471,99 @@ func (p *PubSub) BlacklistPeer(pid peer.ID) {
 // The number of active goroutines is controlled by global and per topic validator
 // throttles; if it exceeds the throttle threshold, messages will be dropped.
 func (p *PubSub) RegisterTopicValidator(topic string, val interface{}, opts ...ValidatorOpt) error {
-	addVal := &addValReq{
+	req := &addValReq{
 		topic:    topic,
 		validate: val,
 		resp:     make(chan error, 1),
 	}
 
 	for _, opt := range opts {
-		err := opt(addVal)
+		err := opt(req)
 		if err != nil {
 			return err
 		}
 	}
 
+	p.Mach.Add1(ss.AddValidator, am.A{"addValReq": req})
 	select {
-	case p.addVal <- addVal:
+	case resp := <-req.resp:
+		return resp
 	case <-p.ctx.Done():
 		return p.ctx.Err()
 	}
-	return <-addVal.resp
 }
 
 // UnregisterTopicValidator removes a validator from a topic.
 // Returns an error if there was no validator registered with the topic.
 func (p *PubSub) UnregisterTopicValidator(topic string) error {
-	rmVal := &rmValReq{
+	req := &rmValReq{
 		topic: topic,
 		resp:  make(chan error, 1),
 	}
-
+	p.Mach.Add1(ss.RemoveValidator, am.A{"rmValReq": req})
 	select {
-	case p.rmVal <- rmVal:
+	case resp := <-req.resp:
+		return resp
 	case <-p.ctx.Done():
 		return p.ctx.Err()
 	}
-	return <-rmVal.resp
+}
+
+// SetLogLevelAM changes the machines log level. Used by tests for debugging active nodes.
+func (p *PubSub) SetLogLevelAM(level am.LogLevel) {
+	p.Mach.SetLogLevel(level)
+	p.disc.mach.SetLogLevel(level)
+}
+
+var globHostNum int
+
+// initMachine initializes the pubsub state machine.
+func (p *PubSub) initMachine() error {
+	var (
+		err      error
+		machOpts *am.Opts
+	)
+
+	// tracing
+	if psmon.IsTracingAM() {
+
+		// init the tracer in case only PS is traced
+		// TODO psmon.InitOtelTracer()
+
+		// this is the topmost machine, other ones (within this pubsub host) will
+		// inherit tracing from this one (but not logging)
+		tracer := telemetry.NewOtelMachTracer(psmon.OtelTracer, &telemetry.OtelMachTracerOpts{
+			SkipTransitions: !psmon.IsTracingAMTx(),
+			Logf:            psmon.Log.Printf,
+		})
+		psmon.AMTracers = append(psmon.AMTracers, tracer)
+
+		machOpts = &am.Opts{
+			Tracers: []am.Tracer{tracer},
+		}
+	}
+
+	// host number for multi-hosts tests
+	hostNum := globHostNum
+	globHostNum++
+	// pass to submachines
+	p.ctx = context.WithValue(p.ctx, "psmonHostNum", hostNum)
+
+	// machine init
+	machID := fmt.Sprintf("ps-%d", hostNum)
+	p.Mach, err = am.NewCommon(p.ctx, machID, ss.States, ss.Names, p, nil, machOpts)
+	if err != nil {
+		return err
+	}
+
+	// ps monitor init
+	psmon.SetUpMach(p.Mach, hostNum)
+
+	if psmon.IsTracingAM() {
+		p.Mach.Log("tracing enabled: %d", psmon.IsTracingAMTx())
+	}
+
+	return nil
 }
 
 type RelayCancelFunc func()

@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	ssPS "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 	"github.com/libp2p/go-libp2p/core/peer"
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 )
 
 const (
@@ -361,8 +363,10 @@ loop:
 	}
 
 	// no async validators, accepted message, send it!
+	whenPushed := v.p.Mach.WhenArgs(ssPS.PublishMessage, am.A{"msgID": msg.ID}, nil)
+	v.p.Mach.Add1(ssPS.PublishMessage, am.A{"Message": msg, "msgID": msg.ID})
 	select {
-	case v.p.sendMsg <- msg:
+	case <-whenPushed:
 		return nil
 	case <-v.p.ctx.Done():
 		return v.p.ctx.Err()
@@ -388,7 +392,7 @@ func (v *validation) doValidateTopic(vals []*validatorImpl, src peer.ID, msg *Me
 
 	switch result {
 	case ValidationAccept:
-		v.p.sendMsg <- msg
+		v.p.Mach.Add1(ssPS.PublishMessage, am.A{"Message": msg, "msgID": msg.ID})
 	case ValidationReject:
 		log.Debugf("message validation failed; dropping message from %s", src)
 		v.tracer.RejectMessage(msg, RejectValidationFailed)

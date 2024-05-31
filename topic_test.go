@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	tnet "github.com/libp2p/go-libp2p-testing/net"
 	"github.com/libp2p/go-libp2p/core/peer"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
 )
 
 func getTopics(psubs []*PubSub, topicID string, opts ...TopicOpt) []*Topic {
@@ -77,6 +77,7 @@ func TestTopicCloseWithOpenEventHandler(t *testing.T) {
 	)
 }
 
+// TODO asyncmachine fix
 func TestTopicCloseWithOpenRelay(t *testing.T) {
 	var relayCancel RelayCancelFunc
 	var err error
@@ -622,14 +623,14 @@ func TestTopicRelayReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// TODO use When1 instead
 	time.Sleep(time.Millisecond * 100)
 
-	res := make(chan bool, 1)
-	pubsubs[0].eval <- func() {
-		res <- pubsubs[0].myRelays[topic] == 3
-	}
+	var isCorrectNumber bool
+	pubsubs[0].Mach.Eval(nil, func() {
+		isCorrectNumber = pubsubs[0].myRelays[topic] == 3
+	}, "TestTopicRelayReuse")
 
-	isCorrectNumber := <-res
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")
 	}
@@ -639,11 +640,10 @@ func TestTopicRelayReuse(t *testing.T) {
 	relay1Cancel()
 	relay1Cancel()
 
-	pubsubs[0].eval <- func() {
-		res <- pubsubs[0].myRelays[topic] == 2
-	}
+	pubsubs[0].Mach.Eval(nil, func() {
+		isCorrectNumber = pubsubs[0].myRelays[topic] == 2
+	}, "TestTopicRelayReuse")
 
-	isCorrectNumber = <-res
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")
 	}
@@ -653,11 +653,10 @@ func TestTopicRelayReuse(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 100)
 
-	pubsubs[0].eval <- func() {
-		res <- pubsubs[0].myRelays[topic] == 0
-	}
+	pubsubs[0].Mach.Eval(nil, func() {
+		isCorrectNumber = pubsubs[0].myRelays[topic] == 0
+	}, "TestTopicRelayReuse")
 
-	isCorrectNumber = <-res
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")
 	}
@@ -922,6 +921,7 @@ func TestWithTopicMsgIdFunction(t *testing.T) {
 	}
 }
 
+// TODO asyncmachine: fails when running all tests only
 func TestTopicPublishWithKeyInvalidParameters(t *testing.T) {
 	t.Parallel()
 

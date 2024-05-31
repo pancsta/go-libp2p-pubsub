@@ -7,10 +7,13 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	ssPS "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
-
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/pancsta/asyncmachine-go/pkg/x/helpers"
+
+	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 )
 
 // ErrTopicClosed is returned if a Topic is utilized after it has been closed
@@ -54,31 +57,26 @@ func (t *Topic) SetScoreParams(p *TopicScoreParams) error {
 		return ErrTopicClosed
 	}
 
-	result := make(chan error, 1)
 	update := func() {
 		gs, ok := t.p.rt.(*GossipSubRouter)
 		if !ok {
-			result <- fmt.Errorf("pubsub router is not gossipsub")
+			err = fmt.Errorf("pubsub router is not gossipsub")
 			return
 		}
 
 		if gs.score == nil {
-			result <- fmt.Errorf("peer scoring is not enabled in router")
+			err = fmt.Errorf("peer scoring is not enabled in router")
 			return
 		}
 
-		err := gs.score.SetTopicScoreParams(t.topic, p)
-		result <- err
+		err = gs.score.SetTopicScoreParams(t.topic, p)
 	}
 
-	select {
-	case t.p.eval <- update:
-		err = <-result
+	t.p.Mach.Eval(nil, update, "SetScoreParams")
+	if err != nil {
 		return err
-
-	case <-t.p.ctx.Done():
-		return t.p.ctx.Err()
 	}
+	return nil
 }
 
 // EventHandler creates a handle for topic specific events
@@ -105,10 +103,7 @@ func (t *Topic) EventHandler(opts ...TopicEventHandlerOpt) (*TopicEventHandler, 
 		}
 	}
 
-	done := make(chan struct{}, 1)
-
-	select {
-	case t.p.eval <- func() {
+	eval := func() {
 		tmap := t.p.topics[t.topic]
 		for p := range tmap {
 			h.evtLog[p] = PeerJoin
@@ -117,13 +112,13 @@ func (t *Topic) EventHandler(opts ...TopicEventHandlerOpt) (*TopicEventHandler, 
 		t.evtHandlerMux.Lock()
 		t.evtHandlers[h] = struct{}{}
 		t.evtHandlerMux.Unlock()
-		done <- struct{}{}
-	}:
-	case <-t.p.ctx.Done():
-		return nil, t.p.ctx.Err()
 	}
 
-	<-done
+	// run on the main pubsubs queue
+	t.p.Mach.Eval(nil, eval, "Topic.EventHandler")
+	if err := t.p.ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return h, nil
 }
@@ -148,8 +143,9 @@ func (t *Topic) Subscribe(opts ...SubOpt) (*Subscription, error) {
 	}
 
 	sub := &Subscription{
-		topic: t.topic,
-		ctx:   t.p.ctx,
+		topic:  t.topic,
+		ctx:    t.p.ctx,
+		psMach: t.p.Mach,
 	}
 
 	for _, opt := range opts {
@@ -168,16 +164,17 @@ func (t *Topic) Subscribe(opts ...SubOpt) (*Subscription, error) {
 
 	t.p.disc.Discover(sub.topic)
 
-	select {
-	case t.p.addSub <- &addSubReq{
+	req := &addSubReq{
 		sub:  sub,
 		resp: out,
-	}:
+	}
+	t.p.Mach.Add1(ssPS.AddSubscription, am.A{"addSubReq": req})
+	select {
+	case resp := <-out:
+		return resp, nil
 	case <-t.p.ctx.Done():
 		return nil, t.p.ctx.Err()
 	}
-
-	return <-out, nil
 }
 
 // Relay enables message relaying for the topic and returns a reference
@@ -194,16 +191,17 @@ func (t *Topic) Relay() (RelayCancelFunc, error) {
 
 	t.p.disc.Discover(t.topic)
 
-	select {
-	case t.p.addRelay <- &addRelayReq{
+	req := &addRelayReq{
 		topic: t.topic,
 		resp:  out,
-	}:
+	}
+	t.p.Mach.Add1(ssPS.AddRelay, am.A{"addRelayReq": req})
+	select {
+	case resp := <-out:
+		return resp, nil
 	case <-t.p.ctx.Done():
 		return nil, t.p.ctx.Err()
 	}
-
-	return <-out, nil
 }
 
 // RouterReady is a function that decides if a router is ready to publish
@@ -276,23 +274,20 @@ func (t *Topic) Publish(ctx context.Context, data []byte, opts ...PubOpt) error 
 			// and check again whenever events tell us that the number of
 			// peers has increased.
 			var ticker *time.Ticker
-		readyLoop:
 			for {
 				// Check if ready for publishing.
 				// Similar to what disc.Bootstrap does.
-				res := make(chan bool, 1)
-				select {
-				case t.p.eval <- func() {
-					done, _ := pub.ready(t.p.rt, t.topic)
-					res <- done
-				}:
-					if <-res {
-						break readyLoop
-					}
-				case <-t.p.ctx.Done():
-					return t.p.ctx.Err()
-				case <-ctx.Done():
-					return ctx.Err()
+				var ok bool
+				req := func() {
+					ok, _ = pub.ready(t.p.rt, t.topic)
+				}
+				t.p.Mach.Eval(ctx, req, "Topic.Publish")
+				if ok {
+					break
+				}
+				// validate contexts
+				if err := helpers.ErrFromCtxs(ctx, t.p.ctx); err != nil {
+					return err
 				}
 				if ticker == nil {
 					ticker = time.NewTicker(200 * time.Millisecond)
@@ -308,6 +303,7 @@ func (t *Topic) Publish(ctx context.Context, data []byte, opts ...PubOpt) error 
 		}
 	}
 
+	t.p.Mach.Log("PushLocal")
 	return t.p.val.PushLocal(&Message{m, "", t.p.host.ID(), nil, pub.local})
 }
 
@@ -354,20 +350,17 @@ func (t *Topic) Close() error {
 	}
 
 	req := &rmTopicReq{t, make(chan error, 1)}
+	t.p.Mach.Add(am.S{ssPS.RemoveTopic}, am.A{"rmTopicReq": req})
 
 	select {
-	case t.p.rmTopic <- req:
+	case err := <-req.resp:
+		if err == nil {
+			t.closed = true
+		}
+		return err
 	case <-t.p.ctx.Done():
 		return t.p.ctx.Err()
 	}
-
-	err := <-req.resp
-
-	if err == nil {
-		t.closed = true
-	}
-
-	return err
 }
 
 // ListPeers returns a list of peers we are connected to in the given topic.

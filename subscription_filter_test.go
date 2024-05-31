@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -170,15 +170,12 @@ func TestSubscriptionFilterRPC(t *testing.T) {
 	time.Sleep(time.Second)
 
 	var sub1, sub2, sub3 bool
-	ready := make(chan struct{})
 
-	ps1.eval <- func() {
+	ps1.Mach.Eval(nil, func() {
 		_, sub1 = ps1.topics["test1"][hosts[1].ID()]
 		_, sub2 = ps1.topics["test2"][hosts[1].ID()]
 		_, sub3 = ps1.topics["test3"][hosts[1].ID()]
-		ready <- struct{}{}
-	}
-	<-ready
+	}, "TestSubscriptionFilterRPC")
 
 	if sub1 {
 		t.Fatal("expected no subscription for test1")
@@ -190,13 +187,11 @@ func TestSubscriptionFilterRPC(t *testing.T) {
 		t.Fatal("expected no subscription for test1")
 	}
 
-	ps2.eval <- func() {
+	ps2.Mach.Eval(nil, func() {
 		_, sub1 = ps2.topics["test1"][hosts[0].ID()]
 		_, sub2 = ps2.topics["test2"][hosts[0].ID()]
 		_, sub3 = ps2.topics["test3"][hosts[0].ID()]
-		ready <- struct{}{}
-	}
-	<-ready
+	}, "TestSubscriptionFilterRPC")
 
 	if sub1 {
 		t.Fatal("expected no subscription for test1")

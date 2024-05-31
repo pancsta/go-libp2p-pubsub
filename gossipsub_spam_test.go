@@ -13,7 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
 
 	"github.com/libp2p/go-msgio/protoio"
 )
@@ -573,14 +573,12 @@ func TestGossipsubAttackGRAFTDuringBackoff(t *testing.T) {
 					}
 
 					// make sure we are _not_ in the mesh
-					res := make(chan bool)
-					ps.eval <- func() {
+					var inMesh bool
+					ps.Mach.Eval(nil, func() {
 						mesh := ps.rt.(*GossipSubRouter).mesh[mytopic]
-						_, inMesh := mesh[attacker.ID()]
-						res <- inMesh
-					}
+						_, inMesh = mesh[attacker.ID()]
+					}, "TestGossipsubAttackGRAFTDuringBackoff")
 
-					inMesh := <-res
 					if inMesh {
 						t.Error("Expected to not be in the mesh of the legitimate host")
 						return // cannot call t.Fatal in a non-test goroutine
