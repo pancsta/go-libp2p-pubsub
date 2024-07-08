@@ -544,9 +544,9 @@ func (p *PubSub) processLoop(ctx context.Context) {
 	}
 }
 
-///////////////
-///// HANDLERS
-///////////////
+// ///// ///// /////
+// ///// HANDLERS
+// ///// ///// /////
 
 func (p *PubSub) PeersPendingState(e *am.Event) {
 	p.Mach.Remove1(ss.PeersPending, nil)
@@ -1018,9 +1018,9 @@ func (p *PubSub) TopicAnnouncedState(e *am.Event) {
 	p.Mach.Remove1(ss.TopicAnnounced, nil)
 }
 
-///////////////
-///// METHODS
-///////////////
+// ///// ///// /////
+// ///// METHODS
+// ///// ///// /////
 
 func (p *PubSub) announceRetry(pid peer.ID, topic string, sub bool) {
 	time.Sleep(time.Duration(1+rand.Intn(1000)) * time.Millisecond)
@@ -1512,7 +1512,7 @@ func (p *PubSub) UnregisterTopicValidator(topic string) error {
 // SetLogLevelAM changes the machines log level. Used by tests for debugging active nodes.
 func (p *PubSub) SetLogLevelAM(level am.LogLevel) {
 	p.Mach.SetLogLevel(level)
-	p.disc.mach.SetLogLevel(level)
+	p.disc.Mach.SetLogLevel(level)
 }
 
 var globHostNum int

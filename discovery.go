@@ -77,7 +77,7 @@ type discover struct {
 	// options are the set of options to be used to complete struct construction in Start
 	options *discoverOptions
 
-	mach *am.Machine
+	Mach *am.Machine
 
 	ongoingBootstrap     map[string]*bootstrapFlow
 	ongoingBootstrapLock sync.Mutex
@@ -106,12 +106,12 @@ func (d *discover) Start(p *PubSub, opts ...DiscoverOpt) error {
 
 	hostNum := p.ctx.Value("psmonHostNum").(int)
 	machName := fmt.Sprintf("ps-%d-disc", hostNum)
-	d.mach, err = am.NewCommon(d.p.Mach.Ctx, machName,
+	d.Mach, err = am.NewCommon(d.p.Mach.Ctx, machName,
 		ss.States, ss.Names, d, d.p.Mach, nil)
 	if err != nil {
 		return err
 	}
-	psmon.SetUpMach(d.mach, hostNum)
+	psmon.SetUpMach(d.Mach, hostNum)
 
 	conn, err := d.options.connFactory(p.host)
 	if err != nil {
@@ -119,7 +119,7 @@ func (d *discover) Start(p *PubSub, opts ...DiscoverOpt) error {
 	}
 	d.connector = conn
 
-	if res := d.mach.Add1(ss.Start, nil); res == am.Canceled {
+	if res := d.Mach.Add1(ss.Start, nil); res == am.Canceled {
 		return am.ErrCanceled
 	}
 
@@ -135,7 +135,7 @@ func (d *discover) PoolTimerState(e *am.Event) {
 			return
 		case <-time.After(DiscoveryPollInitialDelay):
 		}
-		d.mach.Add1(ss.RefreshingDiscoveries, nil)
+		d.Mach.Add1(ss.RefreshingDiscoveries, nil)
 
 		if DiscoveryPollInterval == 0 {
 			return
@@ -145,21 +145,21 @@ func (d *discover) PoolTimerState(e *am.Event) {
 
 		for {
 			select {
-			case <-d.mach.Ctx.Done():
+			case <-d.Mach.Ctx.Done():
 				return
 			case <-ticker.C:
-				d.mach.Add1(ss.RefreshingDiscoveries, nil)
+				d.Mach.Add1(ss.RefreshingDiscoveries, nil)
 			}
 		}
 	}()
 }
 
 func (d *discover) RefreshingDiscoveriesState(e *am.Event) {
-	d.mach.Remove1(ss.RefreshingDiscoveries, nil)
+	d.Mach.Remove1(ss.RefreshingDiscoveries, nil)
 	for t := range d.p.myTopics {
 		if !d.p.rt.EnoughPeers(t, 0) {
 			req := &discoverReq{topic: t}
-			d.mach.Add1(ss.DiscoveringTopic, am.A{
+			d.Mach.Add1(ss.DiscoveringTopic, am.A{
 				"discoverReq": req,
 				"topic":       t,
 				"source":      "discover.RefreshingDiscoveriesState",
@@ -181,7 +181,7 @@ func (d *discover) DiscoveringTopicState(e *am.Event) {
 	}
 
 	d.ongoing[topic] = struct{}{}
-	ctx := d.mach.Ctx
+	ctx := d.Mach.Ctx
 
 	// write the map early
 	delete(d.ongoing, topic)
@@ -199,8 +199,8 @@ func (d *discover) DiscoveringTopicState(e *am.Event) {
 
 		// TODO err not handled from `c.host.Connect(ctx, pi)`
 		d.connector.Connect(ctx, peerCh)
-		d.mach.Remove1(ss.DiscoveringTopic, nil)
-		d.mach.Add1(ss.TopicDiscovered, am.A{"topic": topic})
+		d.Mach.Remove1(ss.DiscoveringTopic, nil)
+		d.Mach.Add1(ss.TopicDiscovered, am.A{"topic": topic})
 	}()
 }
 
@@ -213,11 +213,11 @@ func (d *discover) AdvertisingTopicState(e *am.Event) {
 
 	if _, ok := d.advertising[topic]; ok {
 		// in progress
-		d.mach.Log("already advertising topic %s", topic)
+		d.Mach.Log("already advertising topic %s", topic)
 		return
 	}
 
-	advertisingCtx, cancel := context.WithCancel(d.mach.Ctx)
+	advertisingCtx, cancel := context.WithCancel(d.Mach.Ctx)
 	d.advertising[topic] = cancel
 
 	go func() {
@@ -255,11 +255,11 @@ func (d *discover) Advertise(topic string) {
 	if d.discovery == nil {
 		return
 	}
-	d.mach.Add1(ss.AdvertisingTopic, am.A{"topic": topic})
+	d.Mach.Add1(ss.AdvertisingTopic, am.A{"topic": topic})
 }
 
 func (d *discover) StopAdvertisingTopicState(e *am.Event) {
-	defer d.mach.Remove1(ss.StopAdvertisingTopic, nil)
+	defer d.Mach.Remove1(ss.StopAdvertisingTopic, nil)
 	topic := e.Args["topic"].(string)
 
 	if advertiseCancel, ok := d.advertising[topic]; ok {
@@ -267,7 +267,7 @@ func (d *discover) StopAdvertisingTopicState(e *am.Event) {
 		delete(d.advertising, topic)
 	}
 
-	d.mach.Remove1(ss.AdvertisingTopic, nil)
+	d.Mach.Remove1(ss.AdvertisingTopic, nil)
 }
 
 // StopAdvertise stops advertising this node's interest in a topic. StopAdvertise is not thread-safe.
@@ -276,7 +276,7 @@ func (d *discover) StopAdvertise(topic string) {
 		return
 	}
 
-	d.mach.Add1(ss.StopAdvertisingTopic, am.A{"topic": topic})
+	d.Mach.Add1(ss.StopAdvertisingTopic, am.A{"topic": topic})
 }
 
 // Discover searches for additional peers interested in a given topic
@@ -285,7 +285,7 @@ func (d *discover) Discover(topic string, opts ...discovery.Option) {
 		return
 	}
 
-	d.mach.Add1(ss.DiscoveringTopic, am.A{
+	d.Mach.Add1(ss.DiscoveringTopic, am.A{
 		"discoverReq": &discoverReq{topic, opts},
 		"source":      "discover.Discover",
 	})
@@ -308,9 +308,9 @@ func (d *discover) BootstrappingTopicState(e *am.Event) {
 	// init a BootstrapFlow machine for this topic
 	flow, err := newBootstrapFlow(ctx, d, topic, ready, opts)
 	if err != nil {
-		d.mach.AddErr(err)
+		d.Mach.AddErr(err)
 	}
-	d.mach.Log("created a BootstrapFlow for topic %s", topic)
+	d.Mach.Log("created a BootstrapFlow for topic %s", topic)
 
 	// grouping multi states need locks
 	d.ongoingBootstrapLock.Lock()
@@ -321,15 +321,15 @@ func (d *discover) BootstrappingTopicState(e *am.Event) {
 	flow.mach.Add1(ss.Start, nil)
 	go func() {
 
-		d.mach.Log("BootstrappingTopicState before")
+		d.Mach.Log("BootstrappingTopicState before")
 		select {
-		case <-d.mach.Ctx.Done():
+		case <-d.Mach.Ctx.Done():
 			return
 		case <-flow.mach.When1(ss.TopicBootstrapped, nil):
 		}
-		d.mach.Log("BootstrappingTopicState done")
-		d.mach.Add1(ss.TopicBootstrapped, am.A{"topic": topic})
-		d.mach.Remove1(ss.BootstrappingTopic, am.A{"topic": topic})
+		d.Mach.Log("BootstrappingTopicState done")
+		d.Mach.Add1(ss.TopicBootstrapped, am.A{"topic": topic})
+		d.Mach.Remove1(ss.BootstrappingTopic, am.A{"topic": topic})
 
 		// clean up
 		d.ongoingBootstrapLock.Lock()
@@ -348,7 +348,7 @@ func (d *discover) BootstrappingTopicExit(e *am.Event) bool {
 func (d *discover) TopicBootstrappedState(e *am.Event) {
 	topic := e.Args["topic"].(string)
 	delete(d.ongoingBootstrap, topic)
-	d.mach.Remove1(ss.BootstrappingTopic, nil)
+	d.Mach.Remove1(ss.BootstrappingTopic, nil)
 }
 
 // Bootstrap attempts to bootstrap to a given topic. Returns true if bootstrapped successfully, false otherwise.
@@ -356,17 +356,17 @@ func (d *discover) Bootstrap(ctx context.Context, topic string, ready RouterRead
 	if d.discovery == nil {
 		return true
 	}
-	d.mach.Log("Bootstrap")
+	d.Mach.Log("Bootstrap")
 
 	// match state with args (has to be done before mach.Add)
-	whenBootstrapped := d.mach.WhenArgs(ss.TopicBootstrapped, am.A{"topic": topic}, nil)
-	d.mach.Add1(ss.BootstrappingTopic,
+	whenBootstrapped := d.Mach.WhenArgs(ss.TopicBootstrapped, am.A{"topic": topic}, nil)
+	d.Mach.Add1(ss.BootstrappingTopic,
 		am.A{"ctx": ctx, "topic": topic, "opts": opts, "ready": ready})
 
 	select {
 	case <-whenBootstrapped:
 		return true
-	case <-d.mach.Ctx.Done():
+	case <-d.Mach.Ctx.Done():
 		return false
 	case <-ctx.Done():
 		return false
@@ -410,9 +410,9 @@ func WithDiscoverConnector(connFactory BackoffConnectorFactory) DiscoverOpt {
 	}
 }
 
-///////////////
-///// BOOTSTRAP FLOW
-///////////////
+// ///// ///// /////
+// /// BOOTSTRAP FLOW
+// ///// ///// /////
 
 // bootstrapFlow is a state machine that handles the bootstrapping process for a given topic.
 type bootstrapFlow struct {
@@ -437,10 +437,10 @@ func newBootstrapFlow(ctx context.Context, d *discover, topic string, ready Rout
 		opts:       opts,
 	}
 	hostNum := d.p.ctx.Value("psmonHostNum").(int)
-	tick := d.mach.Clock(ss.BootstrappingTopic)
+	tick := d.Mach.Clock(ss.BootstrappingTopic)
 
 	id := fmt.Sprintf("ps-%d-disc-bf-%d-%s", hostNum, tick, topic)
-	mach, err := am.NewCommon(d.mach.Ctx, id, ss.StatesBootstrapFlow, ss.NamesBootstrapFlow, b, d.mach, nil)
+	mach, err := am.NewCommon(d.Mach.Ctx, id, ss.StatesBootstrapFlow, ss.NamesBootstrapFlow, b, d.Mach, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -486,8 +486,8 @@ func (b *bootstrapFlow) BootstrapCheckingState(e *am.Event) {
 func (b *bootstrapFlow) DiscoveringTopicState(e *am.Event) {
 
 	args := am.A{"topic": b.topic}
-	whenDiscovered := b.d.mach.WhenArgs(ss.TopicDiscovered, args, nil)
-	b.d.mach.Add1(ss.DiscoveringTopic, am.A{
+	whenDiscovered := b.d.Mach.WhenArgs(ss.TopicDiscovered, args, nil)
+	b.d.Mach.Add1(ss.DiscoveringTopic, am.A{
 		"discoverReq": &discoverReq{b.topic, b.opts},
 		"source":      "bootstrapFlow.DiscoveringTopicState",
 	})
