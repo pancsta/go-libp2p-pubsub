@@ -1,4 +1,4 @@
-module github.com/pancsta/go-libp2p-pubsub
+module github.com/libp2p/go-libp2p-pubsub
 
 go 1.22.3
 

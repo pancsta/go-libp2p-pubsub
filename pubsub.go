@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/pancsta/go-libp2p-pubsub/pb"
-	"github.com/pancsta/go-libp2p-pubsub/timecache"
+	pb "github.com/libp2p/go-libp2p-pubsub/pb"
+	"github.com/libp2p/go-libp2p-pubsub/timecache"
 	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -1426,7 +1426,7 @@ type addRelayReq struct {
 	resp  chan RelayCancelFunc
 }
 
-///// AM API compat
+// /// AM API compat
 
 func (p *PubSub) SetLogLevelAM(_ am.LogLevel) {}
 

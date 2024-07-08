@@ -4,3 +4,4 @@ go-floodsub.test
 
 .idea/
 bench.env
+psmon.log

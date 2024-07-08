@@ -3,7 +3,7 @@ package pubsub
 import (
 	"encoding/binary"
 
-	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 )
 
 func generateU16(data *[]byte) uint16 {

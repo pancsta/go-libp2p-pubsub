@@ -3,7 +3,7 @@ package pubsub
 import (
 	"sync"
 
-	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 )
 
 // msgIDGenerator handles computing IDs for msgs
