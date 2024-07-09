@@ -232,7 +232,7 @@ func TestSimpleDiscovery(t *testing.T) {
 		owner := rand.Intn(len(psubs))
 		psubs[owner].SetLogLevelAM(psmon.AMLogLevelVerbose)
 		// TODO debug
-		//psmon.Log.Print("sending msg ", i, " from ", psubs[owner].Mach.ID)
+		// psmon.Log.Print("sending msg ", i, " from ", psubs[owner].Mach.ID)
 
 		if err := topicHandlers[owner].Publish(ctx, msg, WithReadiness(MinTopicSize(1))); err != nil {
 			t.Fatal(err)
@@ -241,7 +241,7 @@ func TestSimpleDiscovery(t *testing.T) {
 		for ii := range msgs {
 			sub := msgs[ii]
 			// TODO debug
-			//psmon.Log.Print("waiting for msg ", i, " with sub ", ii+1)
+			// psmon.Log.Print("waiting for msg ", i, " with sub ", ii+1)
 			got, err := sub.Next(ctx)
 			if err != nil {
 				t.Fatal(sub.err)
@@ -342,7 +342,7 @@ func waitUntilGossipsubMeshCount(ps *PubSub, topic string, count int) {
 		checkLen := func() {
 			done = len(rt.mesh[topic]) == count
 		}
-		ps.Mach.Eval(nil, checkLen, "waitUntilGossipsubMeshCount")
+		ps.Mach.Eval("waitUntilGossipsubMeshCount", checkLen, nil)
 		if !done {
 			time.Sleep(100 * time.Millisecond)
 		}

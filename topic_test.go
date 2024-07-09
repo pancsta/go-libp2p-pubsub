@@ -627,9 +627,9 @@ func TestTopicRelayReuse(t *testing.T) {
 	time.Sleep(time.Millisecond * 100)
 
 	var isCorrectNumber bool
-	pubsubs[0].Mach.Eval(nil, func() {
+	pubsubs[0].Mach.Eval("TestTopicRelayReuse", func() {
 		isCorrectNumber = pubsubs[0].myRelays[topic] == 3
-	}, "TestTopicRelayReuse")
+	}, nil)
 
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")
@@ -640,9 +640,9 @@ func TestTopicRelayReuse(t *testing.T) {
 	relay1Cancel()
 	relay1Cancel()
 
-	pubsubs[0].Mach.Eval(nil, func() {
+	pubsubs[0].Mach.Eval("TestTopicRelayReuse", func() {
 		isCorrectNumber = pubsubs[0].myRelays[topic] == 2
-	}, "TestTopicRelayReuse")
+	}, nil)
 
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")
@@ -653,9 +653,9 @@ func TestTopicRelayReuse(t *testing.T) {
 
 	time.Sleep(time.Millisecond * 100)
 
-	pubsubs[0].Mach.Eval(nil, func() {
+	pubsubs[0].Mach.Eval("TestTopicRelayReuse", func() {
 		isCorrectNumber = pubsubs[0].myRelays[topic] == 0
-	}, "TestTopicRelayReuse")
+	}, nil)
 
 	if !isCorrectNumber {
 		t.Fatal("incorrect number of relays")

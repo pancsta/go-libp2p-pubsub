@@ -326,20 +326,20 @@ func TestGossipsubFanoutExpiry(t *testing.T) {
 		}
 	}
 
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubFanoutExpiry", func() {
 		if len(psubs[0].rt.(*GossipSubRouter).fanout) == 0 {
 			t.Fatal("owner has no fanout")
 		}
-	}, "TestGossipsubFanoutExpiry")
+	}, nil)
 
 	// wait for TTL to expire fanout peers in owner
 	time.Sleep(time.Second * 2)
 
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubFanoutExpiry", func() {
 		if len(psubs[0].rt.(*GossipSubRouter).fanout) > 0 {
 			t.Fatal("fanout hasn't expired")
 		}
-	}, "TestGossipsubFanoutExpiry")
+	}, nil)
 
 	// wait for it to run in the event loop
 	time.Sleep(10 * time.Millisecond)
@@ -649,7 +649,7 @@ func TestGossipsubPruneBackoffTime(t *testing.T) {
 		// Copy i so this func keeps the correct value in the closure.
 		var idx = i
 		// Run this check in the eval thunk so that we don't step over the heartbeat goroutine and trigger a race.
-		psubs[idx].rt.(*GossipSubRouter).p.Mach.Eval(nil, func() {
+		psubs[idx].rt.(*GossipSubRouter).p.Mach.Eval("TestGossipsubPruneBackoffTime", func() {
 			backoff, ok := psubs[idx].rt.(*GossipSubRouter).backoff["foobar"][hosts[0].ID()]
 			if !ok {
 				atomic.AddUint32(&missingBackoffs, 1)
@@ -657,7 +657,7 @@ func TestGossipsubPruneBackoffTime(t *testing.T) {
 			if ok && backoff.Sub(pruneTime)-params.PruneBackoff > time.Second {
 				t.Errorf("backoff time should be equal to prune backoff (with some slack) was %v", backoff.Sub(pruneTime)-params.PruneBackoff)
 			}
-		}, "TestGossipsubPruneBackoffTime")
+		}, nil)
 	}
 
 	// Sometimes not all the peers will have updated their backoffs by this point. If the majority haven't we'll fail this test.
@@ -1069,13 +1069,13 @@ func TestGossipsubStarTopology(t *testing.T) {
 	psubs := getGossipsubs(ctx, hosts, WithPeerExchange(true), WithFloodPublish(true))
 
 	// configure the center of the star with a very low D
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubStarTopology", func() {
 		gs := psubs[0].rt.(*GossipSubRouter)
 		gs.params.D = 0
 		gs.params.Dlo = 0
 		gs.params.Dhi = 0
 		gs.params.Dscore = 0
-	}, "TestGossipsubStarTopology")
+	}, nil)
 
 	// add all peer addresses to the peerstores
 	// this is necessary because we can't have signed address records witout identify
@@ -1153,13 +1153,13 @@ func TestGossipsubStarTopologyWithSignedPeerRecords(t *testing.T) {
 	psubs := getGossipsubs(ctx, hosts, WithPeerExchange(true), WithFloodPublish(true))
 
 	// configure the center of the star with a very low D
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubStarTopologyWithSignedPeerRecords", func() {
 		gs := psubs[0].rt.(*GossipSubRouter)
 		gs.params.D = 0
 		gs.params.Dlo = 0
 		gs.params.Dhi = 0
 		gs.params.Dscore = 0
-	}, "TestGossipsubStarTopologyWithSignedPeerRecords")
+	}, nil)
 
 	// manually create signed peer records for each host and add them to the
 	// peerstore of the center of the star, which is doing the bootstrapping
@@ -1368,14 +1368,14 @@ func TestGossipsubDirectPeersFanout(t *testing.T) {
 
 	// verify that h0 is in the fanout of h2, but not h1 who is a direct peer
 	result := make(chan bool, 2)
-	psubs[2].Mach.Eval(nil, func() {
+	psubs[2].Mach.Eval("TestGossipsubDirectPeersFanout", func() {
 		rt := psubs[2].rt.(*GossipSubRouter)
 		fanout := rt.fanout["test"]
 		_, ok := fanout[h[0].ID()]
 		result <- ok
 		_, ok = fanout[h[1].ID()]
 		result <- ok
-	}, "TestGossipsubDirectPeersFanout")
+	}, nil)
 
 	inFanout := <-result
 	if !inFanout {
@@ -1395,14 +1395,14 @@ func TestGossipsubDirectPeersFanout(t *testing.T) {
 
 	time.Sleep(2 * time.Second)
 
-	psubs[2].Mach.Eval(nil, func() {
+	psubs[2].Mach.Eval("TestGossipsubDirectPeersFanout", func() {
 		rt := psubs[2].rt.(*GossipSubRouter)
 		mesh := rt.mesh["test"]
 		_, ok := mesh[h[0].ID()]
 		result <- ok
 		_, ok = mesh[h[1].ID()]
 		result <- ok
-	}, "TestGossipsubDirectPeersFanout")
+	}, nil)
 
 	inMesh := <-result
 	if !inMesh {
@@ -1468,9 +1468,9 @@ func TestGossipsubEnoughPeers(t *testing.T) {
 
 	// at this point we have no connections and no mesh, so EnoughPeers should return false
 	res := make(chan bool, 1)
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubEnoughPeers", func() {
 		res <- psubs[0].rt.EnoughPeers("test", 0)
-	}, "TestGossipsubEnoughPeers")
+	}, nil)
 	enough := <-res
 	if enough {
 		t.Fatal("should not have enough peers")
@@ -1481,9 +1481,9 @@ func TestGossipsubEnoughPeers(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubEnoughPeers", func() {
 		res <- psubs[0].rt.EnoughPeers("test", 0)
-	}, "TestGossipsubEnoughPeers")
+	}, nil)
 	enough = <-res
 	if !enough {
 		t.Fatal("should have enough peers")
@@ -1683,17 +1683,17 @@ func TestGossipsubScoreValidatorEx(t *testing.T) {
 	// assert that peer1's score is still 0 (its message was ignored) while peer2 should have
 	// a negative score (its message got rejected)
 	res := make(chan float64, 1)
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubScoreValidatorEx", func() {
 		res <- psubs[0].rt.(*GossipSubRouter).score.Score(hosts[1].ID())
-	}, "TestGossipsubScoreValidatorEx")
+	}, nil)
 	score := <-res
 	if score != 0 {
 		t.Fatalf("expected 0 score for peer1, but got %f", score)
 	}
 
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipsubScoreValidatorEx", func() {
 		res <- psubs[0].rt.(*GossipSubRouter).score.Score(hosts[2].ID())
-	}, "TestGossipsubScoreValidatorEx")
+	}, nil)
 	score = <-res
 	if score >= 0 {
 		t.Fatalf("expected negative score for peer2, but got %f", score)
@@ -1713,7 +1713,7 @@ func TestGossipsubPiggybackControl(t *testing.T) {
 	blah := peer.ID("bogotr0n")
 
 	res := make(chan *RPC, 1)
-	ps.Mach.Eval(nil, func() {
+	ps.Mach.Eval("TestGossipsubPiggybackControl", func() {
 		gs := ps.rt.(*GossipSubRouter)
 		test1 := "test1"
 		test2 := "test2"
@@ -1728,7 +1728,7 @@ func TestGossipsubPiggybackControl(t *testing.T) {
 			Prune: []*pb.ControlPrune{{TopicID: &test1}, {TopicID: &test2}, {TopicID: &test3}},
 		})
 		res <- rpc
-	}, "TestGossipsubPiggybackControl")
+	}, nil)
 
 	rpc := <-res
 	if rpc.Control == nil {
@@ -1772,12 +1772,12 @@ func TestGossipsubMultipleGraftTopics(t *testing.T) {
 	p1Router := psubs[0].rt.(*GossipSubRouter)
 	p2Router := psubs[1].rt.(*GossipSubRouter)
 
-	p2Sub.Mach.Eval(nil, func() {
+	p2Sub.Mach.Eval("TestGossipsubMultipleGraftTopics", func() {
 		// Add topics to second peer
 		p2Router.mesh[firstTopic] = map[peer.ID]struct{}{}
 		p2Router.mesh[secondTopic] = map[peer.ID]struct{}{}
 		p2Router.mesh[thirdTopic] = map[peer.ID]struct{}{}
-	}, "TestGossipsubMultipleGraftTopics")
+	}, nil)
 
 	// Send multiple GRAFT messages to second peer from
 	// 1st peer
@@ -1787,7 +1787,7 @@ func TestGossipsubMultipleGraftTopics(t *testing.T) {
 
 	time.Sleep(time.Second * 1)
 
-	p2Sub.Mach.Eval(nil, func() {
+	p2Sub.Mach.Eval("TestGossipsubMultipleGraftTopics", func() {
 		if _, ok := p2Router.mesh[firstTopic][firstPeer]; !ok {
 			t.Errorf("First peer wasnt added to mesh of the second peer for the topic %s", firstTopic)
 		}
@@ -1797,7 +1797,7 @@ func TestGossipsubMultipleGraftTopics(t *testing.T) {
 		if _, ok := p2Router.mesh[thirdTopic][firstPeer]; !ok {
 			t.Errorf("First peer wasnt added to mesh of the second peer for the topic %s", thirdTopic)
 		}
-	}, "TestGossipsubMultipleGraftTopics")
+	}, nil)
 }
 
 // TODO asyncmachine fix
@@ -1896,7 +1896,7 @@ func TestGossipsubOpportunisticGrafting(t *testing.T) {
 	// check the honest peer meshes, they should have at least 3 honest peers each
 	for _, ps := range psubs {
 		count := 0
-		ps.Mach.Eval(nil, func() {
+		ps.Mach.Eval("TestGossipsubOpportunisticGrafting", func() {
 			gs := ps.rt.(*GossipSubRouter)
 			for _, h := range hosts[:10] {
 				_, ok := gs.mesh["test"][h.ID()]
@@ -1904,7 +1904,7 @@ func TestGossipsubOpportunisticGrafting(t *testing.T) {
 					count++
 				}
 			}
-		}, "TestGossipsubOpportunisticGrafting")
+		}, nil)
 
 		if count < 3 {
 			t.Fatalf("expected at least 3 honest peers, got %d", count)
@@ -1937,7 +1937,7 @@ func TestGossipSubLeaveTopic(t *testing.T) {
 
 	leaveTime := time.Now()
 
-	psubs[0].rt.(*GossipSubRouter).p.Mach.Eval(nil, func() {
+	psubs[0].rt.(*GossipSubRouter).p.Mach.Eval("TestGossipSubLeaveTopic", func() {
 		psubs[0].rt.Leave("test")
 		time.Sleep(time.Second)
 		peerMap := psubs[0].rt.(*GossipSubRouter).backoff["test"]
@@ -1954,11 +1954,11 @@ func TestGossipSubLeaveTopic(t *testing.T) {
 		if backoffTime-GossipSubUnsubscribeBackoff > time.Second {
 			t.Error("Backoff time should be set to GossipSubUnsubscribeBackoff.")
 		}
-	}, "TestGossipSubLeaveTopic")
+	}, nil)
 
 	// Ensure that remote peer 1 also applies the backoff appropriately
 	// for peer 0.
-	psubs[1].rt.(*GossipSubRouter).p.Mach.Eval(nil, func() {
+	psubs[1].rt.(*GossipSubRouter).p.Mach.Eval("TestGossipSubLeaveTopic", func() {
 		peerMap2 := psubs[1].rt.(*GossipSubRouter).backoff["test"]
 		if len(peerMap2) != 1 {
 			t.Fatalf("No peer is populated in the backoff map for peer 1")
@@ -1973,7 +1973,7 @@ func TestGossipSubLeaveTopic(t *testing.T) {
 		if backoffTime-GossipSubUnsubscribeBackoff > time.Second {
 			t.Error("Backoff time should be set to GossipSubUnsubscribeBackoff.")
 		}
-	}, "TestGossipSubLeaveTopic")
+	}, nil)
 }
 
 func TestGossipSubJoinTopic(t *testing.T) {
@@ -2011,9 +2011,9 @@ func TestGossipSubJoinTopic(t *testing.T) {
 	time.Sleep(time.Second)
 
 	var meshMap map[peer.ID]struct{}
-	psubs[0].Mach.Eval(nil, func() {
+	psubs[0].Mach.Eval("TestGossipSubJoinTopic", func() {
 		meshMap = router0.mesh["test"]
-	}, "TestGossipSubJoinTopic")
+	}, nil)
 	if len(meshMap) != 1 {
 		t.Fatalf("Unexpect peer included in the mesh")
 	}

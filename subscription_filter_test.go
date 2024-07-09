@@ -171,11 +171,11 @@ func TestSubscriptionFilterRPC(t *testing.T) {
 
 	var sub1, sub2, sub3 bool
 
-	ps1.Mach.Eval(nil, func() {
+	ps1.Mach.Eval("TestSubscriptionFilterRPC", func() {
 		_, sub1 = ps1.topics["test1"][hosts[1].ID()]
 		_, sub2 = ps1.topics["test2"][hosts[1].ID()]
 		_, sub3 = ps1.topics["test3"][hosts[1].ID()]
-	}, "TestSubscriptionFilterRPC")
+	}, nil)
 
 	if sub1 {
 		t.Fatal("expected no subscription for test1")
@@ -187,11 +187,11 @@ func TestSubscriptionFilterRPC(t *testing.T) {
 		t.Fatal("expected no subscription for test1")
 	}
 
-	ps2.Mach.Eval(nil, func() {
+	ps2.Mach.Eval("TestSubscriptionFilterRPC", func() {
 		_, sub1 = ps2.topics["test1"][hosts[0].ID()]
 		_, sub2 = ps2.topics["test2"][hosts[0].ID()]
 		_, sub3 = ps2.topics["test3"][hosts[0].ID()]
-	}, "TestSubscriptionFilterRPC")
+	}, nil)
 
 	if sub1 {
 		t.Fatal("expected no subscription for test1")

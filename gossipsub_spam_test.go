@@ -574,10 +574,10 @@ func TestGossipsubAttackGRAFTDuringBackoff(t *testing.T) {
 
 					// make sure we are _not_ in the mesh
 					var inMesh bool
-					ps.Mach.Eval(nil, func() {
+					ps.Mach.Eval("TestGossipsubAttackGRAFTDuringBackoff", func() {
 						mesh := ps.rt.(*GossipSubRouter).mesh[mytopic]
 						_, inMesh = mesh[attacker.ID()]
-					}, "TestGossipsubAttackGRAFTDuringBackoff")
+					}, nil)
 
 					if inMesh {
 						t.Error("Expected to not be in the mesh of the legitimate host")

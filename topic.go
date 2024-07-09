@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/pancsta/go-libp2p-pubsub/pb"
-	ssPS "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/pancsta/asyncmachine-go/pkg/x/helpers"
+	pb "github.com/pancsta/go-libp2p-pubsub/pb"
+	ssPS "github.com/pancsta/go-libp2p-pubsub/states/pubsub"
 
 	am "github.com/pancsta/asyncmachine-go/pkg/machine"
 )
@@ -72,7 +72,7 @@ func (t *Topic) SetScoreParams(p *TopicScoreParams) error {
 		err = gs.score.SetTopicScoreParams(t.topic, p)
 	}
 
-	t.p.Mach.Eval(nil, update, "SetScoreParams")
+	t.p.Mach.Eval("SetScoreParams", update, nil)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (t *Topic) EventHandler(opts ...TopicEventHandlerOpt) (*TopicEventHandler, 
 	}
 
 	// run on the main pubsubs queue
-	t.p.Mach.Eval(nil, eval, "Topic.EventHandler")
+	t.p.Mach.Eval("Topic.EventHandler", eval, nil)
 	if err := t.p.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -281,7 +281,7 @@ func (t *Topic) Publish(ctx context.Context, data []byte, opts ...PubOpt) error 
 				req := func() {
 					ok, _ = pub.ready(t.p.rt, t.topic)
 				}
-				t.p.Mach.Eval(ctx, req, "Topic.Publish")
+				t.p.Mach.Eval("Topic.Publish", req, ctx)
 				if ok {
 					break
 				}

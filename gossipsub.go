@@ -1392,7 +1392,7 @@ func appendOrMergeRPC(slice []*RPC, limit int, elems ...RPC) []*RPC {
 
 func (gs *GossipSubRouter) heartbeatTimer() {
 	time.Sleep(gs.params.HeartbeatInitialDelay)
-	gs.p.Mach.Eval(nil, gs.heartbeat, "heartbeatTimer")
+	gs.p.Mach.Eval("heartbeatTimer", gs.heartbeat, nil)
 
 	ticker := time.NewTicker(gs.params.HeartbeatInterval)
 	defer ticker.Stop()
@@ -1400,7 +1400,7 @@ func (gs *GossipSubRouter) heartbeatTimer() {
 	for {
 		select {
 		case <-ticker.C:
-			gs.p.Mach.Eval(nil, gs.heartbeat, "heartbeatTimer")
+			gs.p.Mach.Eval("heartbeatTimer", gs.heartbeat, nil)
 		case <-gs.p.ctx.Done():
 			return
 		}

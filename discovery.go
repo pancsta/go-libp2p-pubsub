@@ -471,7 +471,7 @@ func (b *bootstrapFlow) BootstrapCheckingState(e *am.Event) {
 	}
 
 	// run on the main pubsubs queue
-	ps.Mach.Eval(nil, readyFn, "bootstrapFlow.BootstrapCheckingState")
+	ps.Mach.Eval("bootstrapFlow.BootstrapCheckingState", readyFn, nil)
 	if ready {
 		b.mach.Add1(ss.TopicBootstrapped, nil)
 		return

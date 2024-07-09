@@ -518,7 +518,7 @@ func (p *PubSub) processLoop(ctx context.Context) {
 	defer func() {
 
 		// wait for a full disposal
-		<-p.Mach.WhenDisposed
+		<-p.Mach.WhenDisposed()
 		if psmon.Log != nil {
 			psmon.Log.Printf("pubsub disposed %s\n", p.Mach.ID)
 		}
@@ -1036,7 +1036,7 @@ func (p *PubSub) announceRetry(pid peer.ID, topic string, sub bool) {
 		}
 	}
 
-	p.Mach.Eval(nil, retry, "announceRetry")
+	p.Mach.Eval("announceRetry", retry, nil)
 }
 
 func (p *PubSub) doAnnounceRetry(pid peer.ID, topic string, sub bool) {
@@ -1122,7 +1122,7 @@ func (p *PubSub) notifyLeave(topic string, pid peer.ID) {
 
 func (p *PubSub) handleIncomingRPC(rpc *RPC) {
 	// run on machine's queue (blocks until done)
-	p.Mach.Eval(nil, func() {
+	p.Mach.Eval("handleIncomingRPC", func() {
 
 		// pass the rpc through app specific validation (if any available).
 		if p.appSpecificRpcInspector != nil {
@@ -1204,7 +1204,7 @@ func (p *PubSub) handleIncomingRPC(rpc *RPC) {
 		}
 
 		p.rt.HandleRPC(rpc)
-	}, "handleIncomingRPC")
+	}, nil)
 }
 
 // DefaultMsgIdFn returns a unique ID of the passed Message
