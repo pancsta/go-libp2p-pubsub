@@ -1,7 +1,5 @@
 module github.com/pancsta/go-libp2p-pubsub
 
-replace github.com/pancsta/asyncmachine-go => ../asyncmachine-go
-
 go 1.22.3
 
 require (
