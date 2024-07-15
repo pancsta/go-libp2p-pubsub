@@ -224,8 +224,8 @@ github.com/opencontainers/runtime-spec v1.0.2/go.mod h1:jwyrGlmzljRJv/Fgzds9SsS/
 github.com/opencontainers/runtime-spec v1.2.0 h1:z97+pHb3uELt/yiAWD691HNHQIF07bE7dzrbT927iTk=
 github.com/opencontainers/runtime-spec v1.2.0/go.mod h1:jwyrGlmzljRJv/Fgzds9SsS/C5hL+LL3ko9hs6T5lQ0=
 github.com/openzipkin/zipkin-go v0.1.1/go.mod h1:NtoC/o8u3JlF1lSlyPNswIbeQH9bJTmOf0Erfk+hxe8=
-github.com/pancsta/asyncmachine-go v0.5.0 h1:Ni/iKSMSAzXMSHMwpKxgx9XV0YO46Pytuz8Brl8w40E=
-github.com/pancsta/asyncmachine-go v0.5.0/go.mod h1:MgCUqekozL+AgwsY6CwApHhAS0td9uEm1nW13bAkIVo=
+github.com/pancsta/asyncmachine-go v0.6.2 h1:sPig/zhmzyP0LrMGrGO9JX3dOqQAc6gg3Y6wuoYYRzw=
+github.com/pancsta/asyncmachine-go v0.6.2/go.mod h1:hoG7VB315eqgnRvVfZQQcw7B7CrJMkwqNNHH8N+7CGs=
 github.com/pancsta/go-libp2p-pubsub-benchmark v0.1.0 h1:7pCF9qflYPHK0HSmIdaIyY51aQmdvgPu1BgnLySZigU=
 github.com/pancsta/go-libp2p-pubsub-benchmark v0.1.0/go.mod h1:9L3cHEUTGGFSB7zsur8DyW0EMl4zxRx2f5ZFPQTXX8g=
 github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 h1:onHthvaw9LFnH4t2DcNVpwGmV9E1BkGknEliJkfwQj0=
