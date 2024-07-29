@@ -13,7 +13,7 @@ require (
 	github.com/multiformats/go-multiaddr v0.12.4
 	github.com/multiformats/go-varint v0.0.7
 	github.com/pancsta/asyncmachine-go v0.6.3
-	github.com/pancsta/go-libp2p-pubsub-benchmark v0.1.0
+	github.com/pancsta/go-libp2p-pubsub-benchmark v0.1.2
 	go.opentelemetry.io/otel v1.27.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.27.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.27.0
